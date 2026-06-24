@@ -6,8 +6,17 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "alphagenome-pytorch @ git+https://github.com/genomicsxai/alphagenome-pytorch.git",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.4",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.3",
+    "pytest>=9.0.2",
+    "scikit-learn>=1.9.0",
+    "scipy>=1.18.0",
+    "seaborn>=0.13.2",
     "torch",
     "tqdm>=4.67.3",
+    "wandb>=0.25.1",
 ]
 
 [project.optional-dependencies]

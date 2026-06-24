@@ -13,6 +13,7 @@ __all__ = [
     "load_train_config",
     "merge_train_config",
     "parse_hidden_sizes",
+    "PlantMPRADataset",
     "LentiMPRADataset",
     "DeepSTARRDataset",
     "DEEPSTARR_ADAPTER_UP",
@@ -41,6 +42,10 @@ __all__ = [
 
 
 def __getattr__(name: str):
+    if name == "PlantMPRADataset":
+        from . import mydata
+
+        return getattr(mydata, name)
     if name in {
         "LentiMPRADataset",
         "DeepSTARRDataset",

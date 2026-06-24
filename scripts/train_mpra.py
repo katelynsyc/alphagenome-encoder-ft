@@ -13,7 +13,7 @@ import torch
 from alphagenome_encoder_ft import (
     ConstructSpec,
     AlphaGenomeEncoderModel,
-    LentiMPRADataset,
+    PlantMPRADataset,
     TrainConfig,
     create_dataloader,
     create_optimizer,
@@ -40,6 +40,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--sequence_length", type=int, default=None)
+    parser.add_argument("--barcode_min", type=int, default=None)
     parser.add_argument(
         "--construct_mode",
         type=str,
@@ -111,6 +112,7 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "input_tsv": args.input_tsv,
         "batch_size": args.batch_size,
         "sequence_length": args.sequence_length,
+        "barcode_min": args.barcode_min,
         "construct_mode": args.construct_mode,
         "reverse_complement": args.reverse_complement,
         "rc_prob": args.rc_prob,
@@ -177,20 +179,21 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
     return overrides
 
 
-def _make_dataset(config: TrainConfig, split: str) -> LentiMPRADataset:
+def _make_dataset(config: TrainConfig, split: str) -> PlantMPRADataset: #how do i get this to recognize from mydata.py
     use_augment = split == "train"
-    construct_spec = ConstructSpec(
-        left_adapter=config.data.left_adapter_seq,
-        right_adapter=config.data.right_adapter_seq,
-        promoter_seq=config.data.promoter_seq,
-        barcode_seq=config.data.barcode_seq,
-    )
-    return LentiMPRADataset(
+    # construct_spec = ConstructSpec(
+    #     left_adapter=config.data.left_adapter_seq,
+    #     right_adapter=config.data.right_adapter_seq,
+    #     promoter_seq=config.data.promoter_seq,
+    #     barcode_seq=config.data.barcode_seq,
+    # )
+    return PlantMPRADataset(
         config.data.input_tsv,
         split=split,
+        barcode_min = config.data.barcode_min if split == "train" else 10, #hardcoded 10 as quality control barcode threshold for val/test
         sequence_length=config.data.sequence_length,
-        construct_spec=construct_spec,
-        construct_mode=config.data.construct_mode,
+        #construct_spec=construct_spec,
+        #construct_mode=config.data.construct_mode,
         reverse_complement=config.data.reverse_complement if use_augment else False,
         rc_prob=config.data.rc_prob,
         random_shift=config.data.random_shift if use_augment else False,

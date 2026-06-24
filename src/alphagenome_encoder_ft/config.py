@@ -46,6 +46,7 @@ def _deep_merge(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str,
 class DataConfig:
     input_tsv: str | None = None
     sequence_length: int | None = None
+    barcode_min: int = 10
     construct_mode: str = "promoter_barcode"
     batch_size: int = 32
     reverse_complement: bool = False
@@ -64,6 +65,8 @@ class DataConfig:
     def __post_init__(self) -> None:
         if self.sequence_length is not None and self.sequence_length <= 0:
             raise ValueError("data.sequence_length must be > 0")
+        if self.barcode_min < 1:
+            raise ValueError("data.barcode_min must be >= 1")
         if self.construct_mode not in {"none", "adapters", "promoter", "promoter_barcode", "all"}:
             raise ValueError(
                 "data.construct_mode must be one of none, adapters, promoter, promoter_barcode, all"
