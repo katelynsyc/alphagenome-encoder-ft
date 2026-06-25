@@ -225,3 +225,5 @@ pyrightconfig.json
 
 #results & plots folder want to ignore when pushing
 results/
+metadata/Supplementary Data Set 1.xlsx
+metadata/Supplementary Full Dataset 2.xlsx

@@ -41,6 +41,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--sequence_length", type=int, default=None)
     parser.add_argument("--barcode_min", type=int, default=None)
+    parser.add_argument("--barcode_min_eval", type=int, default=None)
+    
     parser.add_argument(
         "--construct_mode",
         type=str,
@@ -113,6 +115,7 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "batch_size": args.batch_size,
         "sequence_length": args.sequence_length,
         "barcode_min": args.barcode_min,
+        "barcode_min_eval": args.barcode_min_eval,
         "construct_mode": args.construct_mode,
         "reverse_complement": args.reverse_complement,
         "rc_prob": args.rc_prob,
@@ -181,19 +184,13 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
 def _make_dataset(config: TrainConfig, split: str) -> PlantMPRADataset: #how do i get this to recognize from mydata.py
     use_augment = split == "train"
-    # construct_spec = ConstructSpec(
-    #     left_adapter=config.data.left_adapter_seq,
-    #     right_adapter=config.data.right_adapter_seq,
-    #     promoter_seq=config.data.promoter_seq,
-    #     barcode_seq=config.data.barcode_seq,
-    # )
-    return PlantMPRADataset(
+ 
+    return PlantMPRADataset( #passing these from config file when making the dataset
         config.data.input_tsv,
         split=split,
-        barcode_min = config.data.barcode_min if split == "train" else 10, #hardcoded 10 as quality control barcode threshold for val/test
+        barcode_min=config.data.barcode_min,
+        barcode_min_eval=config.data.barcode_min_eval,
         sequence_length=config.data.sequence_length,
-        #construct_spec=construct_spec,
-        #construct_mode=config.data.construct_mode,
         reverse_complement=config.data.reverse_complement if use_augment else False,
         rc_prob=config.data.rc_prob,
         random_shift=config.data.random_shift if use_augment else False,
@@ -201,6 +198,8 @@ def _make_dataset(config: TrainConfig, split: str) -> PlantMPRADataset: #how do 
         max_shift=config.data.max_shift,
         subset_frac=config.data.subset_frac,
         seed=config.runtime.seed,
+        val_chroms=config.data.val_chroms,
+        test_chroms=config.data.test_chroms
     )
 
 
@@ -270,6 +269,9 @@ def main() -> dict[str, Any]:
     train_dataset = _make_dataset(config, "train")
     val_dataset = _make_dataset(config, "val")
     test_dataset = _make_dataset(config, "test")
+
+    for ds in [train_dataset, val_dataset, test_dataset]:
+        ds.chrom_stats() #print the chromosome stats (which chroms included in each split, # seqs and % of dataset contained)
 
     train_loader = create_dataloader(
         train_dataset,

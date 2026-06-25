@@ -1,0 +1,47 @@
+{
+  "model_architecture": {
+    "input_shape": [4, 160],
+    "note_input_shape": "PyTorch Conv1d expects (channels, length) = (4, 160), unlike Keras which uses (length, channels) = (160, 4)",
+    "conv_layers": [
+      {"out_channels": 256, "kernel_size": 7, "activation": "relu", "padding": "same"},
+      {"out_channels": 128, "kernel_size": 5, "activation": "relu", "padding": "same"},
+      {"out_channels":  64, "kernel_size": 3, "activation": "relu", "padding": "same"}
+    ],
+    "pooling_size": 2,
+    "batch_normalization": true,
+    "dense_layers": [
+      {"units": 256, "activation": "relu", "dropout": 0.5},
+      {"units": 256, "activation": "relu", "dropout": 0.5}
+    ],
+    "output_layer": {"units": 2, "activation": "linear"}
+  },
+  "training": {
+    "optimizer": "Adam",
+    "learning_rate": 0.001,
+    "loss": "MSELoss",
+    "batch_size": 16,
+    "max_epochs": 200,
+    "early_stopping": {
+      "monitor": "val_loss",
+      "patience": 10,
+      "min_delta": 0,
+      "mode": "min",
+      "restore_best_weights": true
+    }
+  },
+  "data": {
+    "sequence_length": 160,
+    "encoding": "one_hot",
+    "n_channels": 4,
+    "nucleotide_order": ["A", "C", "G", "T"],
+    "skip_character": "N",
+    "input_column": "Sequence",
+    "target_columns": ["Leaf_activity", "Fruit_activity"], 
+    "n_outputs": 2,
+    "val_chroms": ["ch03"], 
+    "test_chroms": ["ch06"]
+  }, 
+  "environment": {
+    "framework": "PyTorch"
+  }
+}

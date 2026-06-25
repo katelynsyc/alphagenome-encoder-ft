@@ -25,7 +25,7 @@ def excel_to_tsv(mpra_activity_file, sequences_file):
     merged = merged[merged['Fragment'] != '35S enhancer']
     
 
-    merged = merged.rename(columns={'RNA/DNA ratio': 'Leaf', 'Unnamed: 2': 'MG', 'Unnamed: 3': 'Br','Unnamed: 4': 'RR'})
+    merged = merged.rename(columns={'RNA/DNA ratio': 'Leaf', 'Unnamed: 2': 'MG', 'Unnamed: 3': 'Br','Unnamed: 4': 'RR', 'Unique barcodes recovered from RNA-seq libraries': 'Unique Barcodes'})
     activity_cols = ['Leaf', 'MG', 'Br', 'RR'] #these are RNA/DNA, we want to make them log2(RNA/DNA)
     log2_transformed = merged[activity_cols].copy().apply(pd.to_numeric, errors='coerce')
 
@@ -37,7 +37,7 @@ def excel_to_tsv(mpra_activity_file, sequences_file):
     return merged
 
 def filter_threshold(data, barcode_threshold): #returns a dataframe that filtered based on this # of barcodes
-    above_thresh = data[data['Unique barcodes recovered from RNA-seq libraries'] >= barcode_threshold].copy()
+    above_thresh = data[data['Unique Barcodes'] >= barcode_threshold].copy()
     # print(f"\nFiltered data shape: {above_thresh.shape}")
     # print(above_thresh.head())
     return above_thresh
@@ -84,9 +84,10 @@ def make_splits(chromosomes, val_chrom, test_chrom):
     return splits
 
 def save_splits(data, output_path):
-    cols = ['Fragment',	'Leaf', 'MG', 'Br',	'RR', 'Unique barcodes recovered from RNA-seq libraries', 'Chr', 'Sequence']
-    cleaned_df = data[cols].rename(columns={'Unique barcodes recovered from RNA-seq libraries': 'barcode_count'})
-    cleaned_df.to_csv(output_path, sep='\t', index=False)
+    # cols = ['Fragment',	'Leaf', 'MG', 'Br',	'RR', 'Unique Barcodes', 'Chr', 'Sequence']
+    # cleaned_df = data[cols].rename(columns={'Unique barcodes recovered from RNA-seq libraries': 'Unique Barcodes'})
+    # cleaned_df.to_csv(output_path, sep='\t', index=False)
+    data.to_csv(output_path, sep='\t', index=False)
 
 def write_chrom_percentages(chromosomes, chrom_percentages, barcode_threshold, output_path):
     total_seqs = sum(len(df) for df in chromosomes.values())

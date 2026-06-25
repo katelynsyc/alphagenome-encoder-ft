@@ -47,6 +47,7 @@ class DataConfig:
     input_tsv: str | None = None
     sequence_length: int | None = None
     barcode_min: int = 10
+    barcode_min_eval: int = 10
     construct_mode: str = "promoter_barcode"
     batch_size: int = 32
     reverse_complement: bool = False
@@ -61,12 +62,16 @@ class DataConfig:
     right_adapter_seq: str | None = None
     promoter_seq: str | None = None
     barcode_seq: str | None = None
+    val_chroms: list[str] | None = None
+    test_chroms: list[str] | None = None
 
     def __post_init__(self) -> None:
         if self.sequence_length is not None and self.sequence_length <= 0:
             raise ValueError("data.sequence_length must be > 0")
         if self.barcode_min < 1:
             raise ValueError("data.barcode_min must be >= 1")
+        if self.barcode_min_eval < 1:
+            raise ValueError("data.barcode_min_eval must be >= 1")
         if self.construct_mode not in {"none", "adapters", "promoter", "promoter_barcode", "all"}:
             raise ValueError(
                 "data.construct_mode must be one of none, adapters, promoter, promoter_barcode, all"
