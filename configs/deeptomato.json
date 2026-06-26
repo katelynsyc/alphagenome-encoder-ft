@@ -13,7 +13,7 @@
       {"units": 256, "activation": "relu", "dropout": 0.5},
       {"units": 256, "activation": "relu", "dropout": 0.5}
     ],
-    "output_layer": {"units": 2, "activation": "linear"}
+    "output_layer": {"units": 4, "activation": "linear"}
   },
   "training": {
     "optimizer": "Adam",
@@ -36,8 +36,8 @@
     "nucleotide_order": ["A", "C", "G", "T"],
     "skip_character": "N",
     "input_column": "Sequence",
-    "target_columns": ["Leaf_activity", "Fruit_activity"], 
-    "n_outputs": 2,
+    "target_columns": ["Leaf_activity", "MG_activity",  "Br_activity", "RR_activity"], 
+    "n_outputs": 4,
     "val_chroms": ["ch03"], 
     "test_chroms": ["ch06"]
   }, 

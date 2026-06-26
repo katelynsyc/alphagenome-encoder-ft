@@ -247,16 +247,16 @@ def main() -> dict[str, Any]:
         barcode_seq=config.data.barcode_seq,
     )
     model = AlphaGenomeEncoderModel.from_pretrained(
-        config.checkpoint.pretrained_weights,
-        config.head,
-        device=device,
-        construct_spec=construct_spec,
+        config.checkpoint.pretrained_weights, #path to pretrained weights
+        config.head, #config for new prediction head you added
+        device=device, #CPU or GPU
+        #construct_spec=construct_spec,
     )
-    model.initialize_head(effective_sequence_length, device)
-    model.eval()
+    model.initialize_head(effective_sequence_length, device)#new prediction head with correct input dims for linear layers
+    model.eval() #sets mode to set initial state
 
-    n_trainable = sum(p.numel() for p in model.head.parameters())
-    n_total = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.head.parameters()) #only new head parameters
+    n_total = sum(p.numel() for p in model.parameters()) #entire model parameters (backbone & head)
     print("AlphaGenomeEncoderModel created.")
     print(f"  Trainable (head)   : {n_trainable:,}")
     print(f"  Frozen (backbone)  : {n_total - n_trainable:,}")
@@ -276,14 +276,14 @@ def main() -> dict[str, Any]:
     train_loader = create_dataloader(
         train_dataset,
         batch_size=config.data.batch_size,
-        shuffle=True,
-        num_workers=config.data.num_workers,
-        pin_memory=config.data.pin_memory,
+        shuffle=True, #prevents learning order-dependent patterns
+        num_workers=config.data.num_workers, #parallel data loading
+        pin_memory=config.data.pin_memory, #GPU optimization
     )
     val_loader = create_dataloader(
         val_dataset,
         batch_size=config.data.batch_size,
-        shuffle=False,
+        shuffle=False, #reproducible evaluation
         num_workers=config.data.num_workers,
         pin_memory=config.data.pin_memory,
     )
@@ -299,8 +299,8 @@ def main() -> dict[str, Any]:
     print(f"  Val batches   : {len(val_loader):,}")
     print(f"  Test batches  : {len(test_loader):,}")
 
-    stage1_optimizer = create_optimizer(config.optim, model.trainable_parameters(include_encoder=False))
-    stage1_scheduler = create_scheduler(config.optim, stage1_optimizer, config.stage.num_epochs)
+    stage1_optimizer = create_optimizer(config.optim, model.trainable_parameters(include_encoder=False)) #only head is trainable in stage 1
+    stage1_scheduler = create_scheduler(config.optim, stage1_optimizer, config.stage.num_epochs) #scheduler adjusts learning rate during training, defines when to step
     stage1_scheduler_step = scheduler_stepper(config.optim.lr_scheduler)
 
     wandb_epoch_logger = None
@@ -314,7 +314,7 @@ def main() -> dict[str, Any]:
                 config=config.to_dict(),
             )
 
-            def wandb_epoch_logger(metrics: dict[str, Any]) -> None:
+            def wandb_epoch_logger(metrics: dict[str, Any]) -> None: #creates a namespace stage1/train_loss
                 stage = str(metrics["stage"])
                 epoch = float(metrics["epoch"])
                 payload = {"epoch": epoch}
@@ -327,7 +327,7 @@ def main() -> dict[str, Any]:
             print("wandb is not installed; continuing without wandb")
             config.logging.use_wandb = False
 
-    if config.stage.second_stage_lr is not None:
+    if config.stage.second_stage_lr is not None: #has two stages of training, the first where the encoder is frozen and just training the head, in the second stage you can train the entire thing
         def stage2_optimizer_factory(model_obj):
             return create_optimizer(
                 config.optim,

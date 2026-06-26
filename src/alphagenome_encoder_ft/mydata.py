@@ -89,7 +89,7 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         eval_chroms = set(self.val_chroms) | set(self.test_chroms)
         self.train_chroms = ( #store the folds in lists
             # list(train_chroms) if train_chroms is not None else list(self.DEFAULT_FOLD_SPLITS["train"])
-            list(train_chroms) if train_chroms is not None else [chrom for chrom in ALL_TOMATO_CHROMOSOMES if chrom not in eval_chroms] #infers the rest from total chromosomes
+            list(train_chroms) if train_chroms is not None else [chrom for chrom in self.ALL_TOMATO_CHROMOSOMES if chrom not in eval_chroms] #infers the rest from total chromosomes
         )
 
         if not self.input_tsv.exists():
@@ -151,8 +151,9 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     def chrom_stats(self) -> None: #prints the chromosome stats (which chroms included in each split, # seqs and % of dataset contained)
         counts = Counter(self._chroms)
         total = len(self._chroms)
-        print(f"\n{self.split} split with {total} sequence across chromosomes: {self._chroms}")
+        print(f"\n{self.split} split with {total} sequences across chromosomes: {set(self._chroms)}")
         for chrom in sorted(counts):
+            #this should be based on the total count of all sequences in all of the splits, not just from this one split
             n = counts[chrom]
             print(f"  {chrom}: {n:5d} ({100 * n / total:.1f}%)")
 

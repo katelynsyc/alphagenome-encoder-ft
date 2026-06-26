@@ -48,7 +48,7 @@ class DataConfig:
     sequence_length: int | None = None
     barcode_min: int = 10
     barcode_min_eval: int = 10
-    construct_mode: str = "promoter_barcode"
+    #construct_mode: str = "promoter_barcode"
     batch_size: int = 32
     reverse_complement: bool = False
     rc_prob: float = 0.5
@@ -72,10 +72,10 @@ class DataConfig:
             raise ValueError("data.barcode_min must be >= 1")
         if self.barcode_min_eval < 1:
             raise ValueError("data.barcode_min_eval must be >= 1")
-        if self.construct_mode not in {"none", "adapters", "promoter", "promoter_barcode", "all"}:
-            raise ValueError(
-                "data.construct_mode must be one of none, adapters, promoter, promoter_barcode, all"
-            )
+        # if self.construct_mode not in {"none", "adapters", "promoter", "promoter_barcode", "all"}:
+        #     raise ValueError(
+        #         "data.construct_mode must be one of none, adapters, promoter, promoter_barcode, all"
+        #     )
         if not 0 < self.subset_frac <= 1:
             raise ValueError("data.subset_frac must be in (0, 1]")
         if not 0 <= self.rc_prob <= 1:
@@ -110,8 +110,8 @@ class HeadConfig:
             raise ValueError("head.dropout must be in [0, 1)")
         if self.activation not in {"relu", "gelu"}:
             raise ValueError("head.activation must be 'relu' or 'gelu'")
-        if self.head_type not in {"mpra", "deepstarr"}:
-            raise ValueError("head.head_type must be one of mpra, deepstarr")
+        if self.head_type not in {"mpra", "deepstarr", "deeptomato"}:
+            raise ValueError("head.head_type must be one of mpra, deepstarr, deeptomato")
         if self.num_outputs < 1:
             raise ValueError("head.num_outputs must be >= 1")
 
