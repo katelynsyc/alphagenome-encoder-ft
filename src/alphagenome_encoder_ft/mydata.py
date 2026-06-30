@@ -5,10 +5,11 @@ from pathlib import Path #to handle pathfiles
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 from collections import Counter
 import matplotlib.pyplot as plt
 from scipy.stats import stats
+import seaborn as sns
 
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
@@ -29,10 +30,12 @@ def _compute_barcode_weights(barcodes: np.ndarray, scheme: str ="log", cap: floa
     'sqrt' -> sqrt(min(barcodes, cap))
     'lin' -> min(barcodes, cap)
     """
+    if scheme == "none": #you can remove weighting of scheme
+        return np.ones(len(barcodes), dtype=np.float32)
     b = np.minimum(barcodes.astype(float), cap) #make the max #barcodes to be 20, store in column of barcodes
     if scheme == "log":
         w = np.log1p(b) #log(1 + b), compresses large values more
-    elif scheme == "sqrt": 
+    elif scheme == "sqrt":
         w = np.sqrt(b) #square root transformation
     elif scheme == "lin":
         w = b #just used capped values
@@ -40,22 +43,40 @@ def _compute_barcode_weights(barcodes: np.ndarray, scheme: str ="log", cap: floa
         raise ValueError(scheme)
     w = w / w.mean() #divides the proportion by the mean of these transformed weights,  ensures weighted loss has similar magnitude to unweighted loss
     
-    plot_scatterplot(barcodes, w, split)
+    # plot_scatterplot(barcodes, w, split)
+    # plot_heatmap_weights(barcodes, w, split)
+    #plot_kde_weights(barcodes, w, split)
     return w.astype(np.float32)
 
-def plot_scatterplot(barcode_counts, weights, split):
-    print(barcode_counts.shape)
-    print(weights.shape)
-    plt.scatter(barcode_counts,weights)
-    #m, b, r_value, _, _ = stats.linregress(barcode_counts, weights)
-    #plt.plot(barcode_counts, m * barcode_counts + b, color="black", linewidth=1)
+# def plot_scatterplot(barcode_counts, weights, split):
+#     print(barcode_counts.shape)
+#     print(weights.shape)
+#     plt.scatter(barcode_counts,weights)
+#     #m, b, r_value, _, _ = stats.linregress(barcode_counts, weights)
+#     #plt.plot(barcode_counts, m * barcode_counts + b, color="black", linewidth=1)
 
-    plt.title(f"Barcode Counts vs. Barcode Weights ({split})")
-    plt.xlabel("Unique Barcodes Count")
-    plt.ylabel("Barcode Weights")
-    plt.savefig(f'results/plots/barcodecountvsweight_{split}.png', dpi=300)
-    plt.close()
+#     plt.title(f"Barcode Counts vs. Barcode Weights ({split})")
+#     plt.xlabel("Unique Barcodes Count")
+#     plt.ylabel("Barcode Weights")
+#     plt.savefig(f'results/plots/barcodecountvsweight_{split}.png', dpi=300)
+#     plt.close()
 
+# def plot_heatmap_weights(barcode_counts, weights, split):
+#     plt.figure(figsize=(10, 8))
+#     plt.hist2d(barcode_counts, weights, bins=[50, 50], cmap='viridis', cmin=1)
+#     plt.colorbar(label='Density (count)')
+#     plt.xlabel('Barcode Count')
+#     plt.ylabel('Weight')
+#     plt.title(f'2D Density {split}: Barcode Count vs Weight')
+#     plt.savefig(f'results/plots/barcodeweight_{split}heatmap.png', dpi=300)
+
+# def plot_kde_weights(barcode_counts, weights, split):
+#     plt.figure(figsize=(10, 8))
+#     sns.kdeplot(x=barcode_counts, y=weights, cmap='rocket', fill=True, levels=20)
+#     plt.xlabel('Barcode Count')
+#     plt.ylabel('Weight')
+#     plt.title(f'2D {split} Kernel Density: Barcode Count vs Weight')
+#     plt.savefig(f'results/plots/barcodeweight_{split}kde.png', dpi=300)
 
 class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     """PyTorch Dataset for tomatoMPRA TSV files."""
@@ -93,7 +114,7 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             barcode_min_eval: int = 10,  # quality-control threshold for val/test splits
             weight_scheme = "log" #for weighted loss based on barcode
     ) -> None: #catch errors that may arise from inputs
-        if split not in self.DEFAULT_FOLD_SPLITS:
+        if split not in (*self.DEFAULT_FOLD_SPLITS, "all"):
             raise ValueError(f"Unknown split: {split!r}")
         if sequence_length is not None and sequence_length <= 0:
             raise ValueError("sequence_length must be > 0")
@@ -149,6 +170,7 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             [[float(row["Leaf"]), float(row["MG"]), float(row["Br"]), float(row["RR"])] for row in rows],
             dtype=np.float32,
         )  # shape (N, 4): gene expression per tissue [Leaf, MG, Br, RR]
+
         barcodes = np.array([float(row["Unique Barcodes"]) for row in rows], dtype=np.float32)
         self._weights = (
             _compute_barcode_weights(barcodes, scheme=weight_scheme, split=self.split)
@@ -158,11 +180,14 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
 
 
     def _read_tsv(self) -> list[dict[str, str]]:
-        split_folds = { #assigns split_folds to whichever of these you selected with split var
-            "train": self.train_chroms,
-            "val": self.val_chroms,
-            "test": self.test_chroms,
-        }[self.split]
+        if self.split == "all":
+            split_folds = self.ALL_TOMATO_CHROMOSOMES
+        else:
+            split_folds = {
+                "train": self.train_chroms,
+                "val": self.val_chroms,
+                "test": self.test_chroms,
+            }[self.split]
 
 
         rows: list[dict[str, str]] = [] #list of dictionaries with keys/values as string
@@ -192,9 +217,12 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         construct = f"{self.left_adapter}{self._payloads[index]}{self.right_adapter}" #adds the adapters
         onehot = sequence_to_onehot(construct).astype(np.float32, copy=False)
         onehot = self._augment(onehot)
-        target = self._targets[index]
+        target = self._targets[index]  # shape (4,): [Leaf, MG, Br, RR]
+        leaf_fruit = np.array([target[0], target[1:4].mean()], dtype=np.float32)  # shape (2,): [Leaf, mean(MG,Br,RR)]
+
         weight = self._weights[index]
-        return torch.from_numpy(onehot), torch.from_numpy(target), torch.tensor(weight) #add third tensor for the weights
+        #return torch.from_numpy(onehot), torch.from_numpy(target), torch.tensor(weight) #add third tensor for the weights
+        return torch.from_numpy(onehot), torch.from_numpy(leaf_fruit), torch.tensor(weight)
 
     def chrom_stats(self, total: int | None = None) -> None: #prints the chromosome stats (which chroms included in each split, # seqs and % of dataset contained)
         counts = Counter(self._chroms)
@@ -206,6 +234,40 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             print(f"  {chrom}: {n:5d} ({100 * n / denom:.1f}% of all)")
 
         
+def create_random_splits(
+    input_tsv: str | Path,
+    train_frac: float = 0.8,
+    val_frac: float = 0.1,
+    seed: int = 42,
+    **dataset_kwargs,
+) -> tuple[Subset, Subset, Subset]:
+    """Load the full TSV and randomly split into train/val/test Subsets.
+
+    Augmentation is applied only to the training subset.
+    Barcode weights are disabled for all splits.
+    """
+    if not (0 < train_frac < 1) or not (0 < val_frac < 1) or train_frac + val_frac >= 1:
+        raise ValueError("train_frac and val_frac must be positive and sum to less than 1")
+
+    full_aug = PlantMPRADataset(input_tsv, split="all", seed=seed, weight_scheme=None, **dataset_kwargs)
+
+    eval_kwargs = {**dataset_kwargs, "reverse_complement": False, "random_shift": False, "weight_scheme": None}
+    full_noaug = PlantMPRADataset(input_tsv, split="all", seed=seed, **eval_kwargs)
+
+    n = len(full_aug)
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(n).tolist()
+
+    n_train = int(round(n * train_frac))
+    n_val = int(round(n * val_frac))
+
+    return (
+        Subset(full_aug,   indices[:n_train]),
+        Subset(full_noaug, indices[n_train : n_train + n_val]),
+        Subset(full_noaug, indices[n_train + n_val :]),
+    )
+
+
 def create_dataloader(
     dataset: Dataset,
     batch_size: int,

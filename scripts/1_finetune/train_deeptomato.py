@@ -5,10 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 import torch.nn as nn
-import matplotlib.pyplot as plt
 
 import numpy as np
-from scipy.stats import pearsonr, spearmanr, stats
 
 import torch
 
@@ -17,13 +15,14 @@ from alphagenome_encoder_ft import (
     PlantMPRADataset,
     TrainConfig,
     create_dataloader,
+    create_random_splits,
     create_optimizer,
     merge_train_config,
     parse_hidden_sizes,
-    save_checkpoint
+    save_checkpoint,
 )
 
-from deeptomato import DengConvModel
+from deeptomato import DengConvModel, run_epoch, correlation_metrics, plot_scatterplot
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train DeepTOMATO, legnet and AG MPRA models")
@@ -190,63 +189,6 @@ def _make_dataset(config: TrainConfig, split: str) -> PlantMPRADataset:
 
 
 
-def run_epoch(model, loader, loss_fn, optim, device, train: bool):
-    model.train(train) #train = True if training, train = false if val, for test use model.eval()
-    total_loss, n_total = 0.0, 0
-    preds, targets = [], []
-    for x, y, w in loader: #iterates batches from DataLoader, each batch has x = one-hot seqs, y = 4 tissue targets and w = barcode weights
-        x, y, w = x.to(device), y.to(device), w.to(device) #moves all three tensors to device
-        with torch.set_grad_enabled(train):
-            yh = model(x) #forward pass, runs input through model for predictions of shape [batch, 4]
-            loss = loss_fn(yh, y) #MSE that gives [batch, 4] tensor of per sample and per tissue losses
-            per_sample = loss_fn(yh, y).mean(dim=1) #across the 4 conditions, average the per sample loss
-            if train:
-                optim.zero_grad() #clears gradients from previous batch
-                loss = (per_sample * w).mean() #weighted loss based on barcodes
-                loss.backward()
-                optim.step()
-            else:
-                loss = per_sample.mean() #plain MSE for val / test because diff barcode threshold, true model performance
-        total_loss += loss.item() * len(x) #running loss sum
-        n_total += len(x)
-        preds.append(yh.detach().cpu().numpy()) #removes gradient attachment
-        targets.append(y.cpu().numpy())
-    return total_loss / n_total, np.concatenate(preds), np.concatenate(targets)
-
-
-def correlation_metrics(preds, targets, prefix: str) -> dict:
-    out = {}
-    for i, name in enumerate(["Leaf", "MG", "Br", "RR"]):
-        out[f"{prefix}/{name}_pearson"] = float(pearsonr(preds[:, i], targets[:, i]).statistic)
-        #out[f"{prefix}/{name}_spearman"] = float(spearmanr(preds[:, i], targets[:, i]).statistic)
-    return out
-   
-def plot_scatterplot(predictions, targets, split: str): #plot the predicted versus actual values, with labeled regression line
-    tissues = ["Leaf", "MG", "Br", "RR"]
-    colors = ["#2ecc71", "#e74c3c", "#e67e22", "#e74c3c"]
-
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-    for i, (tissue, color, ax) in enumerate(zip(tissues, colors, axes)):
-        pred_i = predictions[:, i]
-        tgt_i = targets[:, i]
-        ax.scatter(pred_i, tgt_i, color=color, s=8, alpha=0.4)
-
-        m, b, r_value, _, _ = stats.linregress(pred_i, tgt_i)
-        x_line = np.array([pred_i.min(), pred_i.max()]) #line from minimum to maximum prediction value
-        ax.plot(x_line, m * x_line + b, color="black", linewidth=1)
-
-        ax.set_title(f"{tissue}  (r={r_value:.3f})")
-        ax.set_xlabel("Predicted log2(RNA/DNA)")
-        ax.set_ylabel("Actual log2(RNA/DNA)")
-        ax.annotate(f"r² = {r_value**2:.3f}", xy=(0.05, 0.92), xycoords="axes fraction", fontsize=9)
-        ax.annotate(f"y = {m:.2f}x + {b:.2f}", xy=(0.05, 0.85), xycoords="axes fraction", fontsize=9)
-
-    fig.suptitle(f"{split} Predictions vs Actual", fontsize=13)
-    plt.tight_layout()
-    plt.savefig(f'results/plots/{split}predictvsactual.png', dpi=300)
-    plt.close(fig)
-
-    
 def main() -> dict[str, Any]:
     parser = build_arg_parser()
     args = parser.parse_args() #parse arguments
@@ -266,7 +208,10 @@ def main() -> dict[str, Any]:
     except ValueError as exc:
         parser.error(str(exc))
 
-    torch.manual_seed(config.runtime.seed)
+    torch.manual_seed(config.runtime.seed) #we want to expand the seeds to be the same for many others, dataloader 
+    #set all seeds to be the same
+    #seed_everything(config.runtime.seed, workers=True) #seeds random, numpy, torch & for multiple DataLoader workers
+
     device = torch.device(config.runtime.device or ("cuda" if torch.cuda.is_available() else "cpu")) #pick a device to run on
     print(f"Using device: {device}", flush=True)
     
@@ -279,15 +224,33 @@ def main() -> dict[str, Any]:
     print(f"Loading pretrained weights from {config.checkpoint.pretrained_weights}...")
 
     model = DengConvModel(arch_config, config.head).to(device)
-    model.eval()
 
-    train_dataset = _make_dataset(config, "train") #make the Dataset
-    val_dataset = _make_dataset(config, "val")
-    test_dataset = _make_dataset(config, "test")
+    if config.data.split_mode == "random":
+        train_dataset, val_dataset, test_dataset = create_random_splits(
+            config.data.input_tsv,
+            train_frac=config.data.train_frac,
+            val_frac=config.data.val_frac,
+            seed=config.runtime.seed,
+            sequence_length=config.data.sequence_length,
+            barcode_min=config.data.barcode_min,
+            barcode_min_eval=config.data.barcode_min_eval,
+            reverse_complement=config.data.reverse_complement,
+            rc_prob=config.data.rc_prob,
+            random_shift=config.data.random_shift,
+            shift_prob=config.data.shift_prob,
+            max_shift=config.data.max_shift,
+            subset_frac=config.data.subset_frac,
+        )
+        print(f"Random split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
+        print(train_dataset.indices[:5])
+    else:
+        train_dataset = _make_dataset(config, "train")
+        val_dataset = _make_dataset(config, "val")
+        test_dataset = _make_dataset(config, "test")
 
-    all_total = len(train_dataset) + len(val_dataset) + len(test_dataset)
-    for ds in [train_dataset, val_dataset, test_dataset]:
-        ds.chrom_stats(total=all_total)
+        all_total = len(train_dataset) + len(val_dataset) + len(test_dataset)
+        for ds in [train_dataset, val_dataset, test_dataset]:
+            ds.chrom_stats(total=all_total)
 
     train_loader = create_dataloader( #make DataLoader for each of these
         train_dataset,
@@ -394,7 +357,7 @@ def main() -> dict[str, Any]:
 
     model.load_state_dict(best_state)
     test_loss, tp, tt = run_epoch(model, test_loader, loss_fn, optimizer, device, train=False)
-    plot_scatterplot(tp, tt, "test") #plot predictions versus actual
+    #plot_scatterplot(tp, tt, "test") #plot predictions versus actual
     test_corr = correlation_metrics(tp, tt, "test")
 
     print("TEST: " + " ".join(f"{k}={v:.4f}" for k, v in {"test_loss": test_loss, **test_corr}.items()))

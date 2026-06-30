@@ -15,7 +15,7 @@
   "data": {
     "input_tsv": null,
     "sequence_length": 160,
-    "batch_size": 16,
+    "batch_size": 64,
     "barcode_min": 10,
     "barcode_min_eval": 10,
     "reverse_complement": false,
@@ -28,14 +28,17 @@
     "pin_memory": false,
     "val_chroms": ["ch03"],
     "test_chroms": ["ch06"],
-    "weight_scheme": "log"
+    "weight_scheme": "log",
+    "split_mode": "random",
+    "train_frac": 0.8,
+    "val_frac": 0.1
   },
   "head": {
     "head_type": "deeptomato",
     "hidden_sizes": [256, 256],
     "dropout": 0.5,
     "activation": "relu",
-    "num_outputs": 4
+    "num_outputs": 2
   },
   "optim": {
     "optimizer": "adam",
@@ -59,7 +62,7 @@
     "save_mode": "minimal"
   },
   "logging": {
-    "use_wandb": true,
+    "use_wandb": false,
     "wandb_project": "plantmpra",
     "wandb_name": "deeptomato"
   },

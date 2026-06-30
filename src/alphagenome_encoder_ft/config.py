@@ -65,6 +65,9 @@ class DataConfig:
     val_chroms: list[str] | None = None
     test_chroms: list[str] | None = None
     weight_scheme: str | None = "log"
+    split_mode: str = "chrom"  # "chrom" or "random"
+    train_frac: float = 0.8
+    val_frac: float = 0.1
 
     def __post_init__(self) -> None:
         if self.sequence_length is not None and self.sequence_length <= 0:
@@ -89,6 +92,14 @@ class DataConfig:
             raise ValueError("data.batch_size must be > 0")
         if self.num_workers < 0:
             raise ValueError("data.num_workers must be >= 0")
+        if self.split_mode not in {"chrom", "random"}:
+            raise ValueError("data.split_mode must be 'chrom' or 'random'")
+        if not 0 < self.train_frac < 1:
+            raise ValueError("data.train_frac must be in (0, 1)")
+        if not 0 < self.val_frac < 1:
+            raise ValueError("data.val_frac must be in (0, 1)")
+        if self.train_frac + self.val_frac >= 1:
+            raise ValueError("data.train_frac + data.val_frac must be less than 1")
 
 
 @dataclass

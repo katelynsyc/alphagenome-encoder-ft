@@ -1,5 +1,8 @@
-"""DeepTOMATO CNN architectures."""
+"""DeepTOMATO CNN architectures and training utilities."""
 
-from .deng_model import DengConvModel #to be a python package so we can import from here
+from .deng_model import DengConvModel
+from .training import run_epoch
+from .metrics import correlation_metrics
+from .plotting import plot_scatterplot
 
-__all__ = ["DengConvModel"]
+__all__ = ["DengConvModel", "run_epoch", "correlation_metrics", "plot_scatterplot"]
