@@ -64,6 +64,7 @@ class DataConfig:
     barcode_seq: str | None = None
     val_chroms: list[str] | None = None
     test_chroms: list[str] | None = None
+    weight_scheme: str | None = "log"
 
     def __post_init__(self) -> None:
         if self.sequence_length is not None and self.sequence_length <= 0:

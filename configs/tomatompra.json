@@ -10,29 +10,32 @@
     "pooling_size": 2,
     "batch_normalization": true,
     "output_activation": "linear",
-    "_note_data": "encoding=one_hot, nucleotide_order=[A,C,G,T], skip_character=N, input_column=Sequence, target_columns=[Leaf_activity, Fruit_activity]"
+    "_note_data": "encoding=one_hot, nucleotide_order=[A,C,G,T], skip_character=N, input_column=Sequence, target_columns=[Leaf_activity, MG_activity,  Br_activity, RR_activity]"
   },
   "data": {
     "input_tsv": null,
     "sequence_length": 160,
     "batch_size": 16,
+    "barcode_min": 10,
+    "barcode_min_eval": 10,
     "reverse_complement": false,
     "rc_prob": 0.5,
     "random_shift": false,
     "shift_prob": 0.5,
-    "max_shift": 15,
+    "max_shift": 20,
     "subset_frac": 1.0,
     "num_workers": 0,
     "pin_memory": false,
     "val_chroms": ["ch03"],
-    "test_chroms": ["ch06"]
+    "test_chroms": ["ch06"],
+    "weight_scheme": "log"
   },
   "head": {
     "head_type": "deeptomato",
     "hidden_sizes": [256, 256],
     "dropout": 0.5,
     "activation": "relu",
-    "num_outputs": 2
+    "num_outputs": 4
   },
   "optim": {
     "optimizer": "adam",

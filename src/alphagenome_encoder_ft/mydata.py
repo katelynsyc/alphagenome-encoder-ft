@@ -7,6 +7,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 from collections import Counter
+import matplotlib.pyplot as plt
+from scipy.stats import stats
 
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 
@@ -16,6 +18,44 @@ TOMATO_ADAPTER_DOWN = "GAAGTTCATTTCATTTGGAG" #3' adapter seq
 
 def _reverse_complement_onehot(onehot: np.ndarray) -> np.ndarray:
     return onehot[::-1, :][:, [3, 2, 1, 0]] #reverses sequence, then finds complements
+
+def _compute_barcode_weights(barcodes: np.ndarray, scheme: str ="log", cap: float = 20.0, split: str = "") ->  np.ndarray:
+    """Per-fragment sample weight, monotonic in barcode count, mean-1 normalised.
+    NOTE: the table gives ONE global barcode count per fragment (not per stage),
+    so the same weight applies to all four stage targets -- which is exactly what
+    a one-row-per-fragment multitask model with sample_weight expects.
+
+    scheme : 'log' -> log1p(min(barcodes, cap))
+    'sqrt' -> sqrt(min(barcodes, cap))
+    'lin' -> min(barcodes, cap)
+    """
+    b = np.minimum(barcodes.astype(float), cap) #make the max #barcodes to be 20, store in column of barcodes
+    if scheme == "log":
+        w = np.log1p(b) #log(1 + b), compresses large values more
+    elif scheme == "sqrt": 
+        w = np.sqrt(b) #square root transformation
+    elif scheme == "lin":
+        w = b #just used capped values
+    else:
+        raise ValueError(scheme)
+    w = w / w.mean() #divides the proportion by the mean of these transformed weights,  ensures weighted loss has similar magnitude to unweighted loss
+    
+    plot_scatterplot(barcodes, w, split)
+    return w.astype(np.float32)
+
+def plot_scatterplot(barcode_counts, weights, split):
+    print(barcode_counts.shape)
+    print(weights.shape)
+    plt.scatter(barcode_counts,weights)
+    #m, b, r_value, _, _ = stats.linregress(barcode_counts, weights)
+    #plt.plot(barcode_counts, m * barcode_counts + b, color="black", linewidth=1)
+
+    plt.title(f"Barcode Counts vs. Barcode Weights ({split})")
+    plt.xlabel("Unique Barcodes Count")
+    plt.ylabel("Barcode Weights")
+    plt.savefig(f'results/plots/barcodecountvsweight_{split}.png', dpi=300)
+    plt.close()
+
 
 class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     """PyTorch Dataset for tomatoMPRA TSV files."""
@@ -51,6 +91,7 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             seed: int = 42,
             barcode_min: int = 10,       # threshold for train split
             barcode_min_eval: int = 10,  # quality-control threshold for val/test splits
+            weight_scheme = "log" #for weighted loss based on barcode
     ) -> None: #catch errors that may arise from inputs
         if split not in self.DEFAULT_FOLD_SPLITS:
             raise ValueError(f"Unknown split: {split!r}")
@@ -108,6 +149,12 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             [[float(row["Leaf"]), float(row["MG"]), float(row["Br"]), float(row["RR"])] for row in rows],
             dtype=np.float32,
         )  # shape (N, 4): gene expression per tissue [Leaf, MG, Br, RR]
+        barcodes = np.array([float(row["Unique Barcodes"]) for row in rows], dtype=np.float32)
+        self._weights = (
+            _compute_barcode_weights(barcodes, scheme=weight_scheme, split=self.split)
+            if weight_scheme and self.split == "train" #only compute weights for the training set
+            else np.ones(len(rows), dtype=np.float32)
+        )
 
 
     def _read_tsv(self) -> list[dict[str, str]]:
@@ -141,21 +188,22 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             out = np.roll(out, shift, axis=0) #shifts elements in array by specified shift
         return out
     
-    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]: #return one sample
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: #return one sample
         construct = f"{self.left_adapter}{self._payloads[index]}{self.right_adapter}" #adds the adapters
         onehot = sequence_to_onehot(construct).astype(np.float32, copy=False)
         onehot = self._augment(onehot)
-        target = self._targets[index] 
-        return torch.from_numpy(onehot), torch.from_numpy(np.asarray(target, dtype=np.float32)) #convert seq & expression level to pytorch tensor
+        target = self._targets[index]
+        weight = self._weights[index]
+        return torch.from_numpy(onehot), torch.from_numpy(target), torch.tensor(weight) #add third tensor for the weights
 
-    def chrom_stats(self) -> None: #prints the chromosome stats (which chroms included in each split, # seqs and % of dataset contained)
+    def chrom_stats(self, total: int | None = None) -> None: #prints the chromosome stats (which chroms included in each split, # seqs and % of dataset contained)
         counts = Counter(self._chroms)
-        total = len(self._chroms)
-        print(f"\n{self.split} split with {total} sequences across chromosomes: {set(self._chroms)}")
+        split_total = len(self._chroms)
+        denom = total if total is not None else split_total
+        print(f"\n{self.split} split ({split_total} sequences) — chromosomes: {sorted(set(self._chroms))}")
         for chrom in sorted(counts):
-            #this should be based on the total count of all sequences in all of the splits, not just from this one split
             n = counts[chrom]
-            print(f"  {chrom}: {n:5d} ({100 * n / total:.1f}%)")
+            print(f"  {chrom}: {n:5d} ({100 * n / denom:.1f}% of all)")
 
         
 def create_dataloader(

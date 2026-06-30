@@ -36,6 +36,9 @@ def excel_to_tsv(mpra_activity_file, sequences_file):
     merged.to_csv('/home/kachu/alphagenome-encoder-ft/metadata/all_log2_activity.tsv', sep='\t', index=False) #save as tsv
     return merged
 
+def plot_raw_vs_normalized_expression(raw, normalized):
+
+    
 def filter_threshold(data, barcode_threshold): #returns a dataframe that filtered based on this # of barcodes
     above_thresh = data[data['Unique Barcodes'] >= barcode_threshold].copy()
     # print(f"\nFiltered data shape: {above_thresh.shape}")

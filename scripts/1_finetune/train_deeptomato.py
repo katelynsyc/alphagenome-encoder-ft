@@ -1,35 +1,30 @@
 
 from __future__ import annotations
-import torch.nn as nn
 import argparse
 import json
 from pathlib import Path
 from typing import Any
+import torch.nn as nn
+import matplotlib.pyplot as plt
 
 import numpy as np
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import pearsonr, spearmanr, stats
 
 import torch
 
 
 from alphagenome_encoder_ft import (
-    AlphaGenomeEncoderModel,
     PlantMPRADataset,
     TrainConfig,
     create_dataloader,
     create_optimizer,
-    create_scheduler,
-    evaluate,
-    load_checkpoint,
-    load_train_config,
     merge_train_config,
     parse_hidden_sizes,
-    run_training_stage,
-    run_two_stage_training,
-    scheduler_stepper,
+    save_checkpoint
 )
 
- 
+from deeptomato import DengConvModel
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Train DeepTOMATO, legnet and AG MPRA models")
     parser.add_argument("--config", type=str, default=None)
@@ -52,6 +47,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reverse_complement", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--random_shift", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--weight_scheme", type=str, default=None, choices=["log", "sqrt", "lin"])
 
     parser.add_argument("--pooling_type", type=str, default=None, choices=["flatten", "center", "mean", "sum", "max"])
     parser.add_argument("--center_bp", type=int, default=None)
@@ -113,6 +109,7 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "subset_frac": args.subset_frac,
         "num_workers": args.num_workers,
         "pin_memory": args.pin_memory,
+        "weight_scheme": args.weight_scheme,
     }
     head_pairs = {
         "pooling_type": args.pooling_type,
@@ -187,64 +184,32 @@ def _make_dataset(config: TrainConfig, split: str) -> PlantMPRADataset:
         subset_frac=config.data.subset_frac,
         seed=config.runtime.seed,
         val_chroms=config.data.val_chroms,
-        test_chroms=config.data.test_chroms
+        test_chroms=config.data.test_chroms,
+        weight_scheme=config.data.weight_scheme,
     )
 
 
-class deng_model(nn.Module): #custom class that inherits from nn.Module
-    "Make a class for the Deng et al. model in pytorch, it has 3 Conv1D blocks (each: Conv -> BN -> ReLU -> MaxPool1) + two FC blocks)"
-    def __init__(self, model_architecture: dict, head_config):
-        super().__init__() #calls initializer of parent class from inside a child class
-
-        conv_layers = model_architecture["conv_layers"]
-        pool_size = model_architecture["pooling_size"]
-
-        layers = []
-        in_channels = 4 #for one-hot encoded DNA
-        for spec in conv_layers: #for each of the 3 convolutional layers, take out the specs
-            layers += [
-                nn.Conv1d(in_channels, spec["out_channels"], spec["kernel_size"], padding=spec["padding"]),
-                nn.BatchNorm1d(spec["out_channels"]),
-                nn.ReLU(),
-                nn.MaxPool1d(pool_size)
-            ]
-            in_channels = spec["out_channels"] #to stack layers, input of next layer is same as output of previous
-        self.conv = nn.Sequential(*layers)
-
-        activation_fn = nn.ReLU() if head_config.activation == "relu" else nn.GELU() #gaussian otherwise?
-        fc_layers = []
-        for units in head_config.hidden_sizes:  # [256, 256] from tomatompra.json head section
-            fc_layers += [
-                nn.LazyLinear(units),
-                activation_fn,
-                nn.Dropout(head_config.dropout)
-            ]
-        self.head = nn.Sequential(
-            nn.Flatten(),
-            *fc_layers,
-            nn.LazyLinear(head_config.num_outputs)
-        )
-
-
-    def forward(self, x): #when you call model(X) this runs, passes through conv layers then head
-        return self.head(self.conv(x))
 
 def run_epoch(model, loader, loss_fn, optim, device, train: bool):
     model.train(train) #train = True if training, train = false if val, for test use model.eval()
     total_loss, n_total = 0.0, 0
     preds, targets = [], []
-    for x, y in loader:
-        x, y = x.to(device), y.to(device) #UNDERSTAND ALL THIS CODE
+    for x, y, w in loader: #iterates batches from DataLoader, each batch has x = one-hot seqs, y = 4 tissue targets and w = barcode weights
+        x, y, w = x.to(device), y.to(device), w.to(device) #moves all three tensors to device
         with torch.set_grad_enabled(train):
-            yh = model(x)
-            loss = loss_fn(yh, y)
+            yh = model(x) #forward pass, runs input through model for predictions of shape [batch, 4]
+            loss = loss_fn(yh, y) #MSE that gives [batch, 4] tensor of per sample and per tissue losses
+            per_sample = loss_fn(yh, y).mean(dim=1) #across the 4 conditions, average the per sample loss
             if train:
-                optim.zero_grad()
+                optim.zero_grad() #clears gradients from previous batch
+                loss = (per_sample * w).mean() #weighted loss based on barcodes
                 loss.backward()
                 optim.step()
-        total_loss += loss.item() * len(x)
+            else:
+                loss = per_sample.mean() #plain MSE for val / test because diff barcode threshold, true model performance
+        total_loss += loss.item() * len(x) #running loss sum
         n_total += len(x)
-        preds.append(yh.detach().cpu().numpy())
+        preds.append(yh.detach().cpu().numpy()) #removes gradient attachment
         targets.append(y.cpu().numpy())
     return total_loss / n_total, np.concatenate(preds), np.concatenate(targets)
 
@@ -253,9 +218,34 @@ def correlation_metrics(preds, targets, prefix: str) -> dict:
     out = {}
     for i, name in enumerate(["Leaf", "MG", "Br", "RR"]):
         out[f"{prefix}/{name}_pearson"] = float(pearsonr(preds[:, i], targets[:, i]).statistic)
-        out[f"{prefix}/{name}_spearman"] = float(spearmanr(preds[:, i], targets[:, i]).statistic)
+        #out[f"{prefix}/{name}_spearman"] = float(spearmanr(preds[:, i], targets[:, i]).statistic)
     return out
    
+def plot_scatterplot(predictions, targets, split: str): #plot the predicted versus actual values, with labeled regression line
+    tissues = ["Leaf", "MG", "Br", "RR"]
+    colors = ["#2ecc71", "#e74c3c", "#e67e22", "#e74c3c"]
+
+    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+    for i, (tissue, color, ax) in enumerate(zip(tissues, colors, axes)):
+        pred_i = predictions[:, i]
+        tgt_i = targets[:, i]
+        ax.scatter(pred_i, tgt_i, color=color, s=8, alpha=0.4)
+
+        m, b, r_value, _, _ = stats.linregress(pred_i, tgt_i)
+        x_line = np.array([pred_i.min(), pred_i.max()]) #line from minimum to maximum prediction value
+        ax.plot(x_line, m * x_line + b, color="black", linewidth=1)
+
+        ax.set_title(f"{tissue}  (r={r_value:.3f})")
+        ax.set_xlabel("Predicted log2(RNA/DNA)")
+        ax.set_ylabel("Actual log2(RNA/DNA)")
+        ax.annotate(f"r² = {r_value**2:.3f}", xy=(0.05, 0.92), xycoords="axes fraction", fontsize=9)
+        ax.annotate(f"y = {m:.2f}x + {b:.2f}", xy=(0.05, 0.85), xycoords="axes fraction", fontsize=9)
+
+    fig.suptitle(f"{split} Predictions vs Actual", fontsize=13)
+    plt.tight_layout()
+    plt.savefig(f'results/plots/{split}predictvsactual.png', dpi=300)
+    plt.close(fig)
+
     
 def main() -> dict[str, Any]:
     parser = build_arg_parser()
@@ -265,7 +255,7 @@ def main() -> dict[str, Any]:
     # the rest goes to TrainConfig (which ignores _-prefixed keys)
     if args.config is not None:
         with open(args.config) as f:
-            raw = json.load(f)
+            raw = json.load(f) #the dictionary from json
     else:
         raw = {} #if there wasn't anything passed i as the json file, it'll just use the defaults
     arch_config = raw.get("_model_architecture", {}) #if no key config passed in, arch_config will be {}
@@ -283,20 +273,21 @@ def main() -> dict[str, Any]:
     run_dir = Path(config.checkpoint.checkpoint_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "config.json", "w") as handle:
-        json.dump(config.to_dict(), handle, indent=2)
+        json.dump(config.to_dict(), handle, indent=2) #this saves the hyperparameters per run into a config file
     print(f"Saved config to {run_dir / 'config.json'}")
 
     print(f"Loading pretrained weights from {config.checkpoint.pretrained_weights}...")
 
-    model = deng_model(arch_config, config.head).to(device)
+    model = DengConvModel(arch_config, config.head).to(device)
     model.eval()
 
     train_dataset = _make_dataset(config, "train") #make the Dataset
     val_dataset = _make_dataset(config, "val")
     test_dataset = _make_dataset(config, "test")
 
+    all_total = len(train_dataset) + len(val_dataset) + len(test_dataset)
     for ds in [train_dataset, val_dataset, test_dataset]:
-        ds.chrom_stats() #print the chromosome stats (which chroms included in each split, # seqs and % of dataset contained)
+        ds.chrom_stats(total=all_total)
 
     train_loader = create_dataloader( #make DataLoader for each of these
         train_dataset,
@@ -342,42 +333,58 @@ def main() -> dict[str, Any]:
 
             def wandb_epoch_logger(metrics: dict[str, Any]) -> None:
                 stage = str(metrics["stage"])
-                epoch = float(metrics["epoch"])
-                payload = {"epoch": epoch}
+                epoch = int(metrics["epoch"])
+                payload = {}
                 for key, value in metrics.items():
                     if key in {"stage", "epoch"}:
                         continue
                     payload[f"{stage}/{key}"] = value
-                wandb.log(payload)
+                wandb.log(payload, step=epoch)
 
         except ImportError:
             print("wandb is not installed; continuing without wandb")
             config.logging.use_wandb = False
 
     optimizer = create_optimizer(config.optim, model.parameters())
-    loss_fn = nn.MSELoss()
+
+    #weigh the loss function based on the barcode weights
+    loss_fn = nn.MSELoss(reduction='none') #[batch, 4] size of per sample loss, don't reduce to scalar yet
+    
 
     history: dict[str, list] = {"train_loss": [], "val_loss": []}
-    best_val, best_state, epochs_no_improve = float("inf"), None, 0
+    best_val, best_state, epochs_no_improve = float("-inf"), None, 0
+
 
     for epoch in range(config.stage.num_epochs):
         tr_loss, _, _ = run_epoch(model, train_loader, loss_fn, optimizer, device, train=True)
         val_loss, vp, vt = run_epoch(model, val_loader, loss_fn, optimizer, device, train=False)
         corr = correlation_metrics(vp, vt, "val")
+        mean_pearson = float(np.mean([v for k, v in corr.items() if "pearson" in k])) #why is this mean? is this across conditions
 
         history["train_loss"].append(tr_loss)
         history["val_loss"].append(val_loss)
 
-        print(f"epoch={epoch} train_loss={tr_loss:.4f} val_loss={val_loss:.4f} " +
+        print(f"epoch={epoch} train_loss={tr_loss:.4f} val_loss={val_loss:.4f} val_pearson={mean_pearson:.4f} " +
               " ".join(f"{k}={v:.4f}" for k, v in corr.items()))
 
         if wandb_epoch_logger is not None:
             wandb_epoch_logger({"stage": "train", "epoch": epoch,
                                 "train_loss": tr_loss, "val_loss": val_loss, **corr}) #this wraps wandb.log
 
-        if val_loss < best_val:
-            best_val = val_loss
+        # if val_loss < best_val: #using the minimized loss to find the best model
+        #     best_val = val_loss
+        #     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+        #     torch.save(best_state, run_dir / "best_model.pt") #saves weights of the best model to disk file
+        #     epochs_no_improve = 0 #for early stopping if exceeds patience threshold
+        # else:
+        #     epochs_no_improve += 1
+        #     if epochs_no_improve >= config.stage.early_stopping_patience:
+        #         print(f"Early stopping at epoch {epoch}")
+        #         break
+        if mean_pearson > best_val: #using pearson to find what the best model is 
+            best_val = mean_pearson
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            torch.save(best_state, run_dir / "best_model.pt") #saves weights of the best model to disk file
             epochs_no_improve = 0 #for early stopping if exceeds patience threshold
         else:
             epochs_no_improve += 1
@@ -387,7 +394,9 @@ def main() -> dict[str, Any]:
 
     model.load_state_dict(best_state)
     test_loss, tp, tt = run_epoch(model, test_loader, loss_fn, optimizer, device, train=False)
+    plot_scatterplot(tp, tt, "test") #plot predictions versus actual
     test_corr = correlation_metrics(tp, tt, "test")
+
     print("TEST: " + " ".join(f"{k}={v:.4f}" for k, v in {"test_loss": test_loss, **test_corr}.items()))
 
     if wandb_epoch_logger is not None:
@@ -399,7 +408,7 @@ def main() -> dict[str, Any]:
         "test_metrics": {"loss": test_loss, **test_corr},
     }
 
-    with open(run_dir / "history.json", "w") as handle:
+    with open(run_dir / "history.json", "w") as handle: #saves the full training history, each train_loss and val_loss
         json.dump(results["history"], handle, indent=2)
 
     if config.logging.use_wandb:
