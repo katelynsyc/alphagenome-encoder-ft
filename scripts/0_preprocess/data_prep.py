@@ -5,9 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import csv
-from scipy.stats import stats
+from scipy import stats
+import json
 
-def excel_to_tsv(mpra_activity_file, sequences_file):
+def excel_to_tsv(mpra_activity_file, sequences_file, pseudocount):
     fragmentActivity = pd.read_excel(mpra_activity_file, skiprows=1)
     allFragmentSeqs = pd.read_excel(sequences_file, skiprows=1)
     
@@ -24,22 +25,38 @@ def excel_to_tsv(mpra_activity_file, sequences_file):
     merged = merged.drop(merged.index[0]) #bc excel sheet had strange formatting with double label rows
     #remove the 35S enhancer row because that was a control and not tissue, nor developmental stage specific
     merged = merged[merged['Fragment'] != '35S enhancer']
+    merged = merged.reset_index(drop=True) #so raw and normalized share the same index after dropped rows above
 
     merged = merged.rename(columns={'RNA/DNA ratio': 'Leaf', 'Unnamed: 2': 'MG', 'Unnamed: 3': 'Br','Unnamed: 4': 'RR', 'Unique barcodes recovered from RNA-seq libraries': 'Unique Barcodes'})
     raw = merged.copy()
+    #print(raw.head())
+    raw_frags = set(raw['Fragment'].to_list())
     
     activity_cols = ['Leaf', 'MG', 'Br', 'RR'] #these are RNA/DNA, we want to make them log2(RNA/DNA)
 
-    log2_transformed = merged[activity_cols].copy().apply(pd.to_numeric, errors='coerce')
-    #convert to log2 values with psuedocounts
-    merged[activity_cols] = np.log2(log2_transformed.to_numpy(dtype=float) + 0.1) #log2((RNA/DNA) + 0.1)
-    merged = merged.reset_index(drop=True)
+    if not pseudocount: #if we want to use theirs and will later do imputation, there will be a lot of NA values for those
+        nan_log2 = merged[activity_cols].replace(0, np.nan).apply(pd.to_numeric, errors='coerce') # Replaces all 0s with NaN, scoped to the activity columns only
+        merged[activity_cols] = np.log2(nan_log2.to_numpy(dtype=float)) #log2(RNA/DNA), 0s stay NaN for later imputation
+        merged = merged.reset_index(drop=True)
 
-    merged.to_csv('/home/kachu/alphagenome-encoder-ft/metadata/all_log2_activity.tsv', sep='\t', index=False) #save as tsv
-    
-    normalized = merged
-    plot_raw_vs_normalized_expression(raw, normalized)
-    return merged
+        #merged.to_csv('/home/kachu/alphagenome-encoder-ft/metadata/no_pseudo_log2_activity.tsv', sep='\t', index=False) #save as tsv
+        return merged
+
+    else:
+        log2_transformed = merged[activity_cols].copy().apply(pd.to_numeric, errors='coerce')
+        #convert to log2 values with psuedocounts
+        merged[activity_cols] = np.log2(log2_transformed.to_numpy(dtype=float) + 0.1) #log2((RNA/DNA) + 0.1)
+        merged = merged.reset_index(drop=True)
+
+        merged.to_csv('/home/kachu/alphagenome-encoder-ft/metadata/all_log2_activity.tsv', sep='\t', index=False) #save as tsv
+        
+        normalized = merged
+        #print(normalized.head())
+        norm_frags = set(normalized['Fragment'].to_list())
+        is_lined_up = len(raw_frags) == len(norm_frags) and all(a == b for a, b in zip(raw_frags, norm_frags))
+        #print(f"Exact same order: {is_lined_up}")
+        #plot_raw_vs_normalized_expression(raw, normalized)
+        return merged
 
 def plot_raw_vs_normalized_expression(raw, normalized):
     tissues = ["Leaf", "MG", "Br", "RR"]
@@ -54,15 +71,15 @@ def plot_raw_vs_normalized_expression(raw, normalized):
         normalized_i = normalized_i[mask].to_numpy(dtype=float)
         ax.scatter(raw_i, normalized_i, color=color, s=8, alpha=0.4)
 
-        m, b, r_value, _, _ = stats.linregress(raw_i, normalized_i)
-        x_line = np.array([raw_i.min(), raw_i.max()])
-        ax.plot(x_line, m * x_line + b, color="black", linewidth=1)
+        # m, b, r_value, _, _ = stats.linregress(raw_i, normalized_i)
+        # x_line = np.array([raw_i.min(), raw_i.max()])
+        # ax.plot(x_line, m * x_line + b, color="black", linewidth=1)
 
-        ax.set_title(f"{tissue}  (r={r_value:.3f})")
+        ax.set_title(f"{tissue}")
         ax.set_xlabel("Raw Gene Expression (RNA/DNA)")
         ax.set_ylabel("Normalized log2(RNA/DNA)")
-        ax.annotate(f"r² = {r_value**2:.3f}", xy=(0.05, 0.92), xycoords="axes fraction", fontsize=9)
-        ax.annotate(f"y = {m:.2f}x + {b:.2f}", xy=(0.05, 0.85), xycoords="axes fraction", fontsize=9)
+        # ax.annotate(f"r² = {r_value**2:.3f}", xy=(0.05, 0.92), xycoords="axes fraction", fontsize=9)
+        # ax.annotate(f"y = {m:.2f}x + {b:.2f}", xy=(0.05, 0.85), xycoords="axes fraction", fontsize=9)
 
     fig.suptitle(f"Raw vs. Normalized Gene Expression", fontsize=13)
     plt.tight_layout()
@@ -77,37 +94,98 @@ def compare_zero_processing(mpra_activity_file, deng_train, deng_test, tissue_ty
     fragmentActivity = fragmentActivity[fragmentActivity['Fragment'] != '35S enhancer']
     
     fragmentActivity = fragmentActivity.rename(columns={'RNA/DNA ratio': 'Leaf', 'Unnamed: 2': 'MG', 'Unnamed: 3': 'Br','Unnamed: 4': 'RR', 'Unique barcodes recovered from RNA-seq libraries': 'Unique Barcodes'})
-    print(fragmentActivity.head())
-
-    zero_leaf_act =  fragmentActivity[fragmentActivity[tissue_type] == 0] #filtered df with just
-    print(zero_leaf_act)
-    leaf_zeroes = set(zero_leaf_act['Fragment'].to_list()) #compare the ID to those in the deng data to see if they kept them
-    zero_leaf_above_10 = fragmentActivity[(fragmentActivity[tissue_type] == 0) & (fragmentActivity['Unique Barcodes'] >= 10)] 
-    print(f">=10 and 0 {tissue_type}: {zero_leaf_above_10['Fragment'].to_list()}")
+    #print(fragmentActivity.head())
+    
+    if tissue_type == "Fruit": #sum the fruit activity raw values together
+        fragmentActivity ['Fruit'] = fragmentActivity[['MG', 'Br', 'RR']].sum(axis=1)
+        
+    zero_tissue =  fragmentActivity[fragmentActivity[tissue_type] == 0] #filtered df with just
+    print(zero_tissue)
+    print(f"Rows with 0 Fruit Activity {zero_tissue.shape[0]}")
+    zero_tissue = set(zero_tissue['Fragment'].to_list()) #compare the ID to those in the deng data to see if they kept them
+    zero_above_10 = fragmentActivity[(fragmentActivity[tissue_type] == 0) & (fragmentActivity['Unique Barcodes'] >= 10)] 
+    print(f">=10 and 0 {tissue_type}: {zero_above_10['Fragment'].to_list()}")
+    print(f">=10 and 0 {tissue_type} Number: {len(zero_above_10['Fragment'].to_list())}")
     
     #for their train file
     deng_train = pd.read_csv(deng_train, sep='\t')
-    print(deng_train.head())
+    #print(deng_train.head())
     their_train = set(deng_train['Name'].to_list())
 
-    leaf_zero_deng_train = leaf_zeroes & their_train
+    zero_deng_train = zero_tissue & their_train
     print("Intersection of 0 {tissue_type} Activity and Deng Train")
-    print(leaf_zero_deng_train) #these say leaf but func can be used for any of the 4 conditions
-    print(len(leaf_zero_deng_train))
+    print(zero_deng_train) #these say leaf but func can be used for any of the 4 conditions
+    print(len(zero_deng_train))
+    zero_kept_train = deng_train[deng_train['Name'].isin(zero_deng_train)]
+    print("Kept Train Sequences and their Values")
+    print(zero_kept_train)
 
     #for test file
     deng_test = pd.read_csv(deng_test, sep='\t')
-    print(deng_test.head())
+    #print(deng_test.head())
     their_test = set(deng_test['ID'].to_list())
 
-    leaf_zero_deng_test = leaf_zeroes & their_test
+    zero_deng_test = zero_tissue & their_test
     print("Intersection of 0 {tissue_type} Activity and Deng Test")
-    print(leaf_zero_deng_test)
-    print(len(leaf_zero_deng_test))
+    print(zero_deng_test)
+    print(len(zero_deng_test))
+    zero_kept_test = deng_test[deng_test['ID'].isin(zero_deng_test)]
+    print("Kept Test Sequences and their Values")
+    print(zero_kept_test)
 
+    return zero_kept_train, zero_kept_test
 
+def write_imputation_dict(mpra_activity_file, deng_train, deng_test, output_path):
+    """Build {fragment_name: {'Leaf': Leaf_activity, 'Fruit': Fruit_activity}} for every
+    fragment that had a raw 0 activity value (Leaf or Fruit) but was still kept -- with a
+    Deng et al. imputed non-zero activity value -- in their train/test files, and write it
+    to a JSON file at output_path.
+    """
+    imputation_dict: dict[str, dict[str, float]] = {}
 
-    
+    for tissue_type in ("Leaf", "Fruit"):
+        zero_kept_train, zero_kept_test = compare_zero_processing(
+            mpra_activity_file, deng_train, deng_test, tissue_type
+        )
+        for _, row in zero_kept_train.iterrows():
+            imputation_dict[row["Name"]] = {
+                "Leaf": float(row["Leaf_activity"]),
+                "Fruit": float(row["Fruit_activity"]),
+            }
+        for _, row in zero_kept_test.iterrows():
+            imputation_dict[row["ID"]] = {
+                "Leaf": float(row["Leaf_activity"]),
+                "Fruit": float(row["Fruit_activity"]),
+            }
+
+    with open(output_path, "w") as f:
+        json.dump(imputation_dict, f, indent=2)
+
+    print(f"Wrote imputation dict with {len(imputation_dict)} entries to {output_path}")
+    return imputation_dict
+
+def write_imputed_activity_tsv(input_tsv, imputation_dict, output_path):
+    """Read input_tsv (e.g. all_log2_activity.tsv, left untouched), add a
+    Fruit = mean(MG, Br, RR) column, overwrite Leaf/Fruit with Deng et al.'s imputed
+    values for fragments in imputation_dict, and save the result to output_path.
+    mydata.py can then read Leaf/Fruit directly with no runtime imputation needed.
+    """
+    #data = pd.read_csv(input_tsv, sep='\t')
+    data = input_tsv
+    print(f"Pure Log2 Before imputing: {input_tsv}")
+    data['Fruit'] = data[['MG', 'Br', 'RR']].mean(axis=1)
+    columns_titles = ["Fragment", "Leaf", "MG", "Br", "RR", "Fruit", "Unique Barcodes",	"Chr", "Sequence"] #put the fruit values nearby
+    data=data.reindex(columns=columns_titles)
+
+    for fragment, activity in imputation_dict.items():
+        mask = data['Fragment'] == fragment
+        data.loc[mask, 'Leaf'] = activity['Leaf']
+        data.loc[mask, 'Fruit'] = activity['Fruit']
+
+    data.to_csv(output_path, sep='\t', index=False)
+    print(f"Wrote imputed activity tsv ({data.shape[0]} rows) to {output_path}")
+    return data
+
 def filter_threshold(data, barcode_threshold): #returns a dataframe that filtered based on this # of barcodes
     above_thresh = data[data['Unique Barcodes'] >= barcode_threshold].copy()
     # print(f"\nFiltered data shape: {above_thresh.shape}")
@@ -307,15 +385,20 @@ def main():
     deng_train = metadata_path + "/train.txt"
     log_2_activity = metadata_path + "/all_log2_activity.tsv"
     deng_test = metadata_path + "/test.txt"
-    untransformed_diffs = pd.DataFrame(leaf_activity_diff(deng_test, log_2_activity)).transpose()
-    print(f"Max diff: {untransformed_diffs['diff'].max()}")
+    
+    #differences in leaf activity
+    # untransformed_diffs = pd.DataFrame(leaf_activity_diff(deng_test, log_2_activity)).transpose()
+    # print(f"Max diff: {untransformed_diffs['diff'].max()}")
 
-    with pd.option_context("display.precision", 15):
-        print(untransformed_diffs)
+    # with pd.option_context("display.precision", 15):
+    #     print(untransformed_diffs)
 
-    #compare_zero_processing(mpra_activity_file, deng_train, deng_test, 'Br')
+    all_data = excel_to_tsv(mpra_activity_file, sequences_file, False) #true that you want the std log2 and not the pseudocount
+    imputation_dict = write_imputation_dict(mpra_activity_file, deng_train, deng_test, metadata_path + "/imputation_dict.json") #this stays the same
+    write_imputed_activity_tsv(all_data, imputation_dict, metadata_path + "/all_log2_activity_imputed.tsv")
 
-    all_data = excel_to_tsv(mpra_activity_file, sequences_file)
+    #compare_zero_processing(mpra_activity_file, deng_train, deng_test, 'Leaf')
+    
 
     # barcode_threshold = 10
     # above_ten_thresh = filter_threshold(all_data, barcode_threshold) #start with >= 10 unique barcodes

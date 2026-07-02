@@ -16,6 +16,7 @@ from alphagenome_encoder_ft import (
     TrainConfig,
     create_dataloader,
     create_random_splits,
+    create_deng_splits,
     create_optimizer,
     merge_train_config,
     parse_hidden_sizes,
@@ -29,6 +30,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=str, default=None)
 
     parser.add_argument("--input_tsv", type=str, default=None)
+    parser.add_argument("--train_txt", type=str, default=None)
+    parser.add_argument("--test_txt", type=str, default=None)
     parser.add_argument("--pretrained_weights", type=str, default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--save_mode", type=str, default=None, choices=["minimal", "full", "head"])
@@ -96,6 +99,8 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
     data_pairs = {
         "input_tsv": args.input_tsv,
+        "train_txt": args.train_txt,
+        "test_txt": args.test_txt,
         "batch_size": args.batch_size,
         "sequence_length": args.sequence_length,
         "barcode_min": args.barcode_min,
@@ -243,6 +248,20 @@ def main() -> dict[str, Any]:
         )
         print(f"Random split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
         print(train_dataset.indices[:5])
+    elif config.data.split_mode == "deng":
+        train_dataset, val_dataset, test_dataset = create_deng_splits(
+            config.data.train_txt,
+            config.data.test_txt,
+            val_frac=config.data.val_frac,
+            seed=config.runtime.seed,
+            sequence_length=config.data.sequence_length,
+            reverse_complement=config.data.reverse_complement,
+            rc_prob=config.data.rc_prob,
+            random_shift=config.data.random_shift,
+            shift_prob=config.data.shift_prob,
+            max_shift=config.data.max_shift,
+        )
+        print(f"Deng split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
     else:
         train_dataset = _make_dataset(config, "train")
         val_dataset = _make_dataset(config, "val")

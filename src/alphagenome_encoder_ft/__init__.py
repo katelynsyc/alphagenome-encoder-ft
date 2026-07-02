@@ -15,6 +15,8 @@ __all__ = [
     "parse_hidden_sizes",
     "PlantMPRADataset",
     "create_random_splits",
+    "DengMPRADataset",
+    "create_deng_splits",
     "LentiMPRADataset",
     "DeepSTARRDataset",
     "DEEPSTARR_ADAPTER_UP",
@@ -43,7 +45,7 @@ __all__ = [
 
 
 def __getattr__(name: str):
-    if name in {"PlantMPRADataset", "create_random_splits"}:
+    if name in {"PlantMPRADataset", "create_random_splits", "DengMPRADataset", "create_deng_splits"}:
         from . import mydata
 
         return getattr(mydata, name)

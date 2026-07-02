@@ -20,6 +20,9 @@ TOMATO_ADAPTER_DOWN = "GAAGTTCATTTCATTTGGAG" #3' adapter seq
 def _reverse_complement_onehot(onehot: np.ndarray) -> np.ndarray:
     return onehot[::-1, :][:, [3, 2, 1, 0]] #reverses sequence, then finds complements
 
+def _to_float(value: str) -> float:
+    return float(value) if value != "" else np.nan #tsv writes missing values as an empty cell, not the text 'NaN'
+
 def _compute_barcode_weights(barcodes: np.ndarray, scheme: str ="log", cap: float = 20.0, split: str = "") ->  np.ndarray:
     """Per-fragment sample weight, monotonic in barcode count, mean-1 normalised.
     NOTE: the table gives ONE global barcode count per fragment (not per stage),
@@ -112,7 +115,7 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             seed: int = 42,
             barcode_min: int = 10,       # threshold for train split
             barcode_min_eval: int = 10,  # quality-control threshold for val/test splits
-            weight_scheme = "log" #for weighted loss based on barcode
+            weight_scheme = "log", #for weighted loss based on barcode
     ) -> None: #catch errors that may arise from inputs
         if split not in (*self.DEFAULT_FOLD_SPLITS, "all"):
             raise ValueError(f"Unknown split: {split!r}")
@@ -166,10 +169,27 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         
         self._payloads = [str(row["Sequence"]) for row in rows] #this makes a compiled list of all the candidate sequences tested in MPRA (variable insert seqs)
         self._chroms = [row["Chr"].removeprefix(self.CHROM_PREFIX) for row in rows] #all built from same rows list
-        self._targets = np.asarray(
-            [[float(row["Leaf"]), float(row["MG"]), float(row["Br"]), float(row["RR"])] for row in rows],
-            dtype=np.float32,
-        )  # shape (N, 4): gene expression per tissue [Leaf, MG, Br, RR]
+
+        #input_tsv can either be the raw 4-condition table (Leaf, MG, Br, RR) or an
+        #already-imputed table with a Fruit column (see data_prep.py:write_imputed_activity_tsv)
+        if rows and "Fruit" in rows[0]:
+            self._targets = np.asarray(
+                [[_to_float(row["Leaf"]), _to_float(row["Fruit"])] for row in rows],
+                dtype=np.float32,
+            )  # shape (N, 2): [Leaf, Fruit]
+        else:
+            self._targets = np.asarray(
+                [[_to_float(row["Leaf"]), np.mean([_to_float(row["MG"]), _to_float(row["Br"]), _to_float(row["RR"])])] for row in rows],
+                dtype=np.float32,
+            )  # shape (N, 2): [Leaf, mean(MG,Br,RR)]
+
+        nan_rows = np.isnan(self._targets).any(axis=1)
+        if nan_rows.any():
+            example_fragments = [rows[i].get("Fragment", "?") for i in np.flatnonzero(nan_rows)[:5]]
+            raise ValueError(
+                f"{self.input_tsv} ({self.split} split) has {int(nan_rows.sum())} rows with NaN targets "
+                f"(e.g. {example_fragments}); drop or impute them before using this dataset"
+            )
 
         barcodes = np.array([float(row["Unique Barcodes"]) for row in rows], dtype=np.float32)
         self._weights = (
@@ -177,7 +197,6 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             if weight_scheme and self.split == "train" #only compute weights for the training set
             else np.ones(len(rows), dtype=np.float32)
         )
-
 
     def _read_tsv(self) -> list[dict[str, str]]:
         if self.split == "all":
@@ -216,13 +235,14 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: #return one sample
         construct = f"{self.left_adapter}{self._payloads[index]}{self.right_adapter}" #adds the adapters
         onehot = sequence_to_onehot(construct).astype(np.float32, copy=False)
-        onehot = self._augment(onehot)
-        target = self._targets[index]  # shape (4,): [Leaf, MG, Br, RR]
-        leaf_fruit = np.array([target[0], target[1:4].mean()], dtype=np.float32)  # shape (2,): [Leaf, mean(MG,Br,RR)]
+        onehot = self._augment(onehot) 
+        target = self._targets[index]  # shape (4,): [Leaf, MG, Br, RR] or shape (2,): [Leaf, Fruit] depending on file loaded in from
+        #leaf_fruit = np.array([target[0], target[1:4].mean()], dtype=np.float32)  # shape (2,): [Leaf, mean(MG,Br,RR)]
+
 
         weight = self._weights[index]
         #return torch.from_numpy(onehot), torch.from_numpy(target), torch.tensor(weight) #add third tensor for the weights
-        return torch.from_numpy(onehot), torch.from_numpy(leaf_fruit), torch.tensor(weight)
+        return torch.from_numpy(onehot), torch.from_numpy(target), torch.tensor(weight)
 
     def chrom_stats(self, total: int | None = None) -> None: #prints the chromosome stats (which chroms included in each split, # seqs and % of dataset contained)
         counts = Counter(self._chroms)
@@ -233,7 +253,130 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             n = counts[chrom]
             print(f"  {chrom}: {n:5d} ({100 * n / denom:.1f}% of all)")
 
-        
+
+class DengMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
+    """PyTorch Dataset for Deng et al.'s pre-split train.txt/test.txt files.
+
+    Those files only have {Name|ID, Sequence, Leaf_activity, Fruit_activity} columns --
+    no Chr or Unique Barcodes -- so there's no chromosome filtering and no
+    barcode-based sample weighting (weights are always 1).
+    """
+
+    def __init__(
+            self,
+            rows: list[dict[str, str]], #already-read rows, e.g. from csv.DictReader
+            use_adapters: bool = True,
+            left_adapter: str = TOMATO_ADAPTER_UP,
+            right_adapter: str = TOMATO_ADAPTER_DOWN,
+            sequence_length: int | None = 160,
+
+            reverse_complement: bool = False,
+            rc_prob: float = 0.5,
+            random_shift: bool = False,
+            shift_prob: float = 0.5,
+            max_shift: int = 20,
+            seed: int = 42,
+    ) -> None:
+        if sequence_length is not None and sequence_length <= 0:
+            raise ValueError("sequence_length must be > 0")
+        if not 0 <= rc_prob <= 1:
+            raise ValueError("rc_prob must be in [0, 1]")
+        if not 0 <= shift_prob <= 1:
+            raise ValueError("shift_prob must be in [0, 1]")
+        if max_shift < 0:
+            raise ValueError("max_shift must be >= 0")
+
+        self.use_adapters = bool(use_adapters)
+        self.left_adapter = left_adapter if self.use_adapters else ""
+        self.right_adapter = right_adapter if self.use_adapters else ""
+        self.sequence_length = sequence_length
+        self.reverse_complement = reverse_complement
+        self.rc_prob = rc_prob
+        self.random_shift = random_shift
+        self.shift_prob = shift_prob
+        self.max_shift = max_shift
+        self._rng = np.random.default_rng(seed)
+
+        self._payloads = [str(row["Sequence"]) for row in rows]
+        self._targets = np.asarray(
+            [[_to_float(row["Leaf_activity"]), _to_float(row["Fruit_activity"])] for row in rows],
+            dtype=np.float32,
+        )  # shape (N, 2): [Leaf, Fruit]
+
+        nan_rows = np.isnan(self._targets).any(axis=1)
+        if nan_rows.any():
+            raise ValueError(f"{int(nan_rows.sum())} rows have NaN Leaf_activity/Fruit_activity")
+
+        self._weights = np.ones(len(rows), dtype=np.float32) #no barcode counts in this file format
+
+    def __len__(self) -> int:
+        return len(self._payloads)
+
+    def _augment(self, onehot: np.ndarray) -> np.ndarray:
+        out = onehot
+        if self.reverse_complement and self._rng.random() < self.rc_prob: #decide to reverse complement
+            out = _reverse_complement_onehot(out)
+        if self.random_shift and self.max_shift > 0 and self._rng.random() < self.shift_prob: #random shift augmentation
+            shift = int(self._rng.integers(-self.max_shift, self.max_shift + 1)) #pick a shift based on max val
+            out = np.roll(out, shift, axis=0) #shifts elements in array by specified shift
+        return out
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        construct = f"{self.left_adapter}{self._payloads[index]}{self.right_adapter}" #adds the adapters
+        onehot = sequence_to_onehot(construct).astype(np.float32, copy=False)
+        onehot = self._augment(onehot)
+        target = self._targets[index]  # shape (2,): [Leaf, Fruit]
+        weight = self._weights[index]
+        return torch.from_numpy(onehot), torch.from_numpy(target), torch.tensor(weight)
+
+
+def _read_deng_tsv(path: str | Path) -> list[dict[str, str]]:
+    with open(path, newline="") as handle:
+        return list(csv.DictReader(handle, delimiter="\t"))
+
+
+def create_deng_splits(
+    train_txt: str | Path,
+    test_txt: str | Path,
+    val_frac: float = 0.1,
+    seed: int = 42,
+    **dataset_kwargs,
+) -> tuple[Subset, Subset, DengMPRADataset]:
+    """Build train/val/test splits directly from Deng et al.'s train.txt/test.txt.
+
+    val_frac is a fraction of the combined train.txt + test.txt row count (so val
+    ends up roughly the same size as test, since test.txt is itself ~10% of the
+    total), and is carved out of train.txt at random; test.txt is used as-is for
+    the test split. Augmentation is applied only to the training subset.
+    """
+    if not 0 < val_frac < 1:
+        raise ValueError("val_frac must be in (0, 1)")
+
+    train_rows = _read_deng_tsv(train_txt)
+    test_rows = _read_deng_tsv(test_txt)
+
+    n_val = int(round((len(train_rows) + len(test_rows)) * val_frac))
+    if n_val >= len(train_rows):
+        raise ValueError(
+            f"val_frac={val_frac} implies {n_val} val rows, but train.txt only has {len(train_rows)} rows"
+        )
+
+    noaug_kwargs = {**dataset_kwargs, "reverse_complement": False, "random_shift": False}
+
+    full_aug = DengMPRADataset(train_rows, seed=seed, **dataset_kwargs)
+    full_noaug = DengMPRADataset(train_rows, seed=seed, **noaug_kwargs)
+    test_dataset = DengMPRADataset(test_rows, seed=seed, **noaug_kwargs)
+
+    n = len(full_aug)
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(n).tolist()
+
+    val_dataset = Subset(full_noaug, indices[:n_val])
+    train_dataset = Subset(full_aug, indices[n_val:])
+
+    return train_dataset, val_dataset, test_dataset
+
+
 def create_random_splits(
     input_tsv: str | Path,
     train_frac: float = 0.8,

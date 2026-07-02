@@ -45,6 +45,8 @@ def _deep_merge(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str,
 @dataclass
 class DataConfig:
     input_tsv: str | None = None
+    train_txt: str | None = None  # only used when split_mode == "deng"
+    test_txt: str | None = None   # only used when split_mode == "deng"
     sequence_length: int | None = None
     barcode_min: int = 10
     barcode_min_eval: int = 10
@@ -65,7 +67,7 @@ class DataConfig:
     val_chroms: list[str] | None = None
     test_chroms: list[str] | None = None
     weight_scheme: str | None = "log"
-    split_mode: str = "chrom"  # "chrom" or "random"
+    split_mode: str = "chrom"  # "chrom", "random", or "deng"
     train_frac: float = 0.8
     val_frac: float = 0.1
 
@@ -92,8 +94,8 @@ class DataConfig:
             raise ValueError("data.batch_size must be > 0")
         if self.num_workers < 0:
             raise ValueError("data.num_workers must be >= 0")
-        if self.split_mode not in {"chrom", "random"}:
-            raise ValueError("data.split_mode must be 'chrom' or 'random'")
+        if self.split_mode not in {"chrom", "random", "deng"}:
+            raise ValueError("data.split_mode must be 'chrom', 'random', or 'deng'")
         if not 0 < self.train_frac < 1:
             raise ValueError("data.train_frac must be in (0, 1)")
         if not 0 < self.val_frac < 1:
