@@ -229,4 +229,5 @@ metadata/Supplementary Data Set 1.xlsx
 metadata/Supplementary Full Dataset 2.xlsx
 
 # wandb run artifacts (already synced to W&B cloud)
-wandb/test.ipynb
+wandb/
+test.ipynb
