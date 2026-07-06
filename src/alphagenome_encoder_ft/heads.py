@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 PoolingType = Literal["flatten", "center", "mean", "sum", "max"]
-ENCODER_RESOLUTION_BP = 128
+ENCODER_RESOLUTION_BP = 128  
 ENCODER_DIM = 1536
 
 
@@ -86,7 +86,7 @@ class MPRAHead(nn.Module):
         self.dropout = dropout
         self.activation = activation
         self.num_outputs = int(num_outputs)
-        self.norm = nn.LayerNorm(ENCODER_DIM)
+        self.norm = nn.LayerNorm(ENCODER_DIM) #normalizes encoder output (mean = 0, std = 1 across feature dim)
         self.hidden_layers = nn.ModuleList()
         in_features: int | None = None
         for hidden_size in self.hidden_sizes:
@@ -100,13 +100,13 @@ class MPRAHead(nn.Module):
         for linear in self.hidden_layers:
             x = linear(x)
             if self.dropout is not None:
-                x = nn.functional.dropout(x, p=self.dropout, training=self.training)
+                x = nn.functional.dropout(x, p=self.dropout, training=self.training) #zero out p data points during training only
             x = _make_activation(self.activation)(x)
         return x
 
     def _normalize_encoder_output(self, encoder_output: torch.Tensor) -> torch.Tensor:
         x = encoder_output
-        if x.ndim == 3 and x.shape[-1] != ENCODER_DIM and x.shape[1] == ENCODER_DIM:
+        if x.ndim == 3 and x.shape[-1] != ENCODER_DIM and x.shape[1] == ENCODER_DIM: #make sure encoder dim is the third dim
             x = x.transpose(1, 2)
         return self.norm(x)
 
@@ -118,7 +118,7 @@ class MPRAHead(nn.Module):
         seq_len = preds.shape[1]
         if self.pooling_type == "center":
             center_idx = seq_len // 2
-            pooled = preds[:, center_idx, :]
+            pooled = preds[:, center_idx, :] #takes this single value
         else:
             window_positions = max(1, self.center_bp // ENCODER_RESOLUTION_BP)
             window_positions = min(window_positions, seq_len)
@@ -134,8 +134,8 @@ class MPRAHead(nn.Module):
                 raise RuntimeError(f"Unhandled pooling type: {self.pooling_type}")
         return pooled.squeeze(-1) if self.num_outputs == 1 else pooled
 
-    def forward(self, encoder_output: torch.Tensor) -> torch.Tensor:
-        x = self._normalize_encoder_output(encoder_output)
+    def forward(self, encoder_output: torch.Tensor) -> torch.Tensor: #when you call head(encoder_output)
+        x = self._normalize_encoder_output(encoder_output) #ensure correct shape
         if self.pooling_type == "flatten":
             x = x.flatten(1)
             x = self._apply_hidden_layers(x)
