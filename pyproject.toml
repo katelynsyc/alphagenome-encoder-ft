@@ -31,3 +31,6 @@ train = [
     "matplotlib>=3.10.8",
     "wandb>=0.25.1",
 ]
+dev = [
+    "ipykernel>=7.3.0",
+]
