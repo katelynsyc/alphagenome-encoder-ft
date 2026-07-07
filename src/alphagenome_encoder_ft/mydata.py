@@ -1,3 +1,4 @@
+#dataloader that is agnostic to the model, should be reusable
 
 from __future__ import annotations #so that you can reference class before its defined
 import csv

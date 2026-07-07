@@ -58,6 +58,240 @@ def excel_to_tsv(mpra_activity_file, sequences_file, pseudocount):
         #plot_raw_vs_normalized_expression(raw, normalized)
         return merged
 
+def load_pseudocount_log2(log2_excel, sequences_file, readcount_file, output_path=None):
+    """Attach Chr, Sequence, Unique Barcodes to a pseudocount log2 activity table
+    (Fragment, Leaf, Fruit, MG, Br, RR) by looking them up per-Fragment.
+
+    Chr/Sequence come from sequences_file (Supplementary Data Set 1.xlsx, Name/Chr/Sequence
+    columns). Unique Barcodes isn't in that file -- it comes from readcount_file
+    (Supplementary Dataset 2-ReadCount-RPM-ratio-log2ratio.xlsx), the same active-only
+    fragment set log2_excel was itself computed from.
+    """
+    pseudo = pd.read_excel(log2_excel)
+    pseudo = pseudo[pseudo['Fragment'] != '35S enhancer'].reset_index(drop=True)  # control, not a real fragment
+
+    seqs = pd.read_excel(sequences_file, skiprows=1)[['Name', 'Chr', 'Sequence']]
+    counts = pd.read_excel(readcount_file, header=1)[
+        ['Fragment', 'Unique barcodes recovered from RNA-seq libraries']
+    ].rename(columns={'Unique barcodes recovered from RNA-seq libraries': 'Unique Barcodes'})
+
+    merged = pd.merge(pseudo, seqs, left_on='Fragment', right_on='Name', how='left').drop(columns='Name')
+    merged = pd.merge(merged, counts, on='Fragment', how='left')
+
+    missing = merged.loc[merged['Chr'].isna() | merged['Unique Barcodes'].isna(), 'Fragment'].tolist()
+    if missing:
+        print(f"Warning: {len(missing)} fragments missing Chr/Sequence or Unique Barcodes: {missing[:5]}")
+
+    if output_path:
+        merged.to_csv(output_path, sep='\t', index=False)
+        print(f"Wrote {merged.shape[0]} rows to {output_path}")
+
+    return merged
+
+
+def compute_pseudocount_log2_from_readcounts(readcount_file, sequences_file, output_path=None, pseudocount=1):
+    """Recompute per-fragment log2(RNA/DNA) activity directly from the raw
+    'RNA DNA ReadCount All.xlsx' sheet, pooling replicates the correct way instead of
+    using the workbook's own precomputed RPM/ratio/log2 columns.
+
+    The sheet has merged header cells (e.g. 'DNA-seq (ReadCount)', 'RNA-seq (RPM)') sitting
+    above per-library sub-columns (DNA-1, Leaf-1, ...), so it's read with a 2-row header --
+    that keeps every (group, library) column name unique even though 'DNA-1' etc. repeat
+    under both the ReadCount and RPM groups.
+
+    Each step below is printed (labeled) as it's computed:
+      1. total counts  -- recover each library's true sequencing depth as
+                          (count / RPM) * 1e6. This is constant down the column (RPM was
+                          computed from it), so any row would do; we take the median across
+                          all nonzero rows for robustness. One total per library: 3 for DNA,
+                          12 for RNA (Leaf/MG/Br/RR x 3 reps).
+      2. summed totals -- pool replicates: sum DNA's 3 library totals into one shared
+                          denominator, and separately sum each state's 3 library totals.
+                          Also pool the raw counts the same way, per fragment. Fruit pools
+                          all 9 MG+Br+RR replicate libraries together the same way (not an
+                          average of the three states' own log2 values -- see write-up above).
+      3. norms         -- (pooled count + pseudocount) / pooled total x 1e6, per fragment,
+                          done once for DNA, once per state, and once for pooled Fruit.
+      4. log2 activity -- log2(RNA_norm[state] / DNA_norm), per fragment, per state/Fruit.
+
+    Chr/Sequence are then attached by matching Fragment against sequences_file's Name column
+    (Supplementary Data Set 1.xlsx), the same lookup load_pseudocount_log2 uses.
+
+    Returns a DataFrame with columns Fragment, Leaf, MG, Br, RR, Fruit, Unique Barcodes, Chr, Sequence.
+    """
+    data = pd.read_excel(readcount_file, header=[0, 1])
+    fragment_col = ('Unnamed: 0_level_0', 'Fragment')
+    data = data[data[fragment_col] != '35S enhancer'].reset_index(drop=True)  # control row, not a real fragment
+
+    states = ['Leaf', 'MG', 'Br', 'RR']
+    replicates = [1, 2, 3]
+
+    # ---- Step 1: recover each library's true total (sequencing depth) ----
+    def library_total(count_group, rpm_group, library):
+        counts = data[(count_group, library)]
+        rpms = data[(rpm_group, library)]
+        nonzero = rpms > 0  # a fragment absent from this library has count=rpm=0; skip it
+        totals = counts[nonzero] / rpms[nonzero] * 1e6
+        return totals.median()
+
+    dna_totals = {rep: library_total('DNA-seq (ReadCount)', 'DNA-seq (RPM)', f'DNA-{rep}') for rep in replicates}
+    print("Step 1 - recovered DNA library totals:")
+    for rep, total in dna_totals.items():
+        print(f"  DNA-{rep}: {total:,.1f}")
+
+    rna_totals = {
+        state: {rep: library_total('RNA-seq (ReadCount)', 'RNA-seq (RPM)', f'{state}-{rep}') for rep in replicates}
+        for state in states
+    }
+    print("Step 1 - recovered RNA library totals:")
+    for state in states:
+        for rep, total in rna_totals[state].items():
+            print(f"  {state}-{rep}: {total:,.1f}")
+
+    # ---- Step 2: pool replicates -- sum raw counts and sum library totals ----
+    dna_count_sum = sum(data[('DNA-seq (ReadCount)', f'DNA-{rep}')] for rep in replicates)  # per-fragment
+    dna_total_sum = sum(dna_totals.values())  # one number, shared across every state
+
+    print(f"\nStep 2 - pooled DNA total (sum of 3 reps): {dna_total_sum:,.1f}")
+    print("Step 2 - pooled DNA counts (per fragment), preview:")
+    print(dna_count_sum.head())
+
+    rna_count_sum = {}
+    rna_total_sum = {}
+    for state in states:
+        rna_count_sum[state] = sum(data[('RNA-seq (ReadCount)', f'{state}-{rep}')] for rep in replicates)
+        rna_total_sum[state] = sum(rna_totals[state].values())
+        print(f"\nStep 2 - pooled {state} total (sum of 3 reps): {rna_total_sum[state]:,.1f}")
+        print(f"Step 2 - pooled {state} counts (per fragment), preview:")
+        print(rna_count_sum[state].head())
+
+    fruit_states = ['MG', 'Br', 'RR']
+    fruit_total_sum = sum(rna_total_sum[state] for state in fruit_states)  # all 9 MG+Br+RR libraries, pooled
+    fruit_count_sum = sum(rna_count_sum[state] for state in fruit_states)  # per-fragment
+    print(f"\nStep 2 - pooled Fruit total (sum of MG+Br+RR's 9 reps): {fruit_total_sum:,.1f}")
+    print("Step 2 - pooled Fruit counts (per fragment), preview:")
+    print(fruit_count_sum.head())
+
+    # ---- Step 3: normalize each pooled count by its pooled total, RPM-style ----
+    dna_norm = (dna_count_sum + pseudocount) / dna_total_sum * 1e6
+    print("\nStep 3 - DNA_norm (per fragment), preview:")
+    print(dna_norm.head())
+
+    rna_norm = {}
+    for state in states:
+        rna_norm[state] = (rna_count_sum[state] + pseudocount) / rna_total_sum[state] * 1e6
+        print(f"Step 3 - {state}_norm (per fragment), preview:")
+        print(rna_norm[state].head())
+
+    fruit_norm = (fruit_count_sum + pseudocount) / fruit_total_sum * 1e6
+    print("Step 3 - Fruit_norm (per fragment), preview:")
+    print(fruit_norm.head())
+
+    # ---- Step 4: log2(RNA_norm / DNA_norm) activity, per fragment, per state ----
+    result = pd.DataFrame({'Fragment': data[fragment_col]})
+    for state in states:
+        result[state] = np.log2(rna_norm[state] / dna_norm)
+        print(f"\nStep 4 - {state} log2 activity, preview:")
+        print(result[state].head())
+
+    result['Fruit'] = np.log2(fruit_norm / dna_norm)
+    print("\nStep 4 - Fruit log2 activity, preview:")
+    print(result['Fruit'].head())
+
+    result['Unique Barcodes'] = data[('RNA-seq (ReadCount)', 'Unique barcodes recovered from RNA-seq libraries')]
+
+    # ---- attach Chr/Sequence by matching Fragment against sequences_file's Name column ----
+    seqs = pd.read_excel(sequences_file, skiprows=1)[['Name', 'Chr', 'Sequence']]
+    result = pd.merge(result, seqs, left_on='Fragment', right_on='Name', how='left').drop(columns='Name')
+
+    missing = result.loc[result['Chr'].isna(), 'Fragment'].tolist()
+    if missing:
+        print(f"Warning: {len(missing)} fragments missing Chr/Sequence: {missing[:5]}")
+
+    result = result[['Fragment', 'Leaf', 'MG', 'Br', 'RR', 'Fruit', 'Unique Barcodes', 'Chr', 'Sequence']]
+
+    if output_path:
+        result.to_csv(output_path, sep='\t', index=False)
+        print(f"\nWrote {result.shape[0]} rows to {output_path}")
+
+    return result
+
+
+def compute_replicate_log2_activity(readcount_file, pseudocount=1):
+    """Compute per-replicate log2(RNA_norm/DNA_norm) activity, one column per (state, replicate)
+    e.g. 'Leaf-1', 'Leaf-2', 'Leaf-3', 'MG-1', ... -- using a shared pooled DNA normalization
+    (summed across the 3 DNA replicates) as the denominator for every RNA replicate. This mirrors
+    compute_pseudocount_log2_from_readcounts's DNA-side normalization, just without summing the
+    RNA replicates together first, so each replicate keeps its own activity value.
+    """
+    data = pd.read_excel(readcount_file, header=[0, 1])
+    fragment_col = ('Unnamed: 0_level_0', 'Fragment')
+    data = data[data[fragment_col] != '35S enhancer'].reset_index(drop=True)  # control row, not a real fragment
+
+    states = ['Leaf', 'MG', 'Br', 'RR']
+    replicates = [1, 2, 3]
+
+    def library_total(count_group, rpm_group, library):
+        counts = data[(count_group, library)]
+        rpms = data[(rpm_group, library)]
+        nonzero = rpms > 0  # a fragment absent from this library has count=rpm=0; skip it
+        totals = counts[nonzero] / rpms[nonzero] * 1e6
+        return totals.median()
+
+    dna_totals = {rep: library_total('DNA-seq (ReadCount)', 'DNA-seq (RPM)', f'DNA-{rep}') for rep in replicates}
+    dna_count_sum = sum(data[('DNA-seq (ReadCount)', f'DNA-{rep}')] for rep in replicates)
+    dna_total_sum = sum(dna_totals.values())
+    dna_norm = (dna_count_sum + pseudocount) / dna_total_sum * 1e6  # shared across every state/replicate
+
+    result = pd.DataFrame({'Fragment': data[fragment_col]})
+    for state in states:
+        for rep in replicates:
+            library = f'{state}-{rep}'
+            total = library_total('RNA-seq (ReadCount)', 'RNA-seq (RPM)', library)
+            rna_norm = (data[('RNA-seq (ReadCount)', library)] + pseudocount) / total * 1e6
+            result[library] = np.log2(rna_norm / dna_norm)
+
+    result['Unique Barcodes'] = data[('RNA-seq (ReadCount)', 'Unique barcodes recovered from RNA-seq libraries')]
+
+    return result
+
+
+def compute_replicate_correlations(readcount_file, pseudocount=1, method='pearson', min_barcodes=None):
+    """For each triplicate condition (Leaf, MG, Br, RR), compute the pairwise correlation
+    between every pair of replicates' log2(RNA/DNA) activity values (1v2, 1v3, 2v3), then
+    average those three pairwise correlations into a single per-condition replicate
+    correlation -- one number each for Leaf, MG, Br, and RR.
+
+    method is passed straight to pd.Series.corr ('pearson', 'spearman', or 'kendall').
+    min_barcodes, if given, restricts to fragments with Unique Barcodes >= min_barcodes
+    before correlating (same threshold semantics as filter_threshold).
+
+    Returns {state: {'pairwise': {'1v2': r, '1v3': r, '2v3': r}, 'mean': avg_r}}.
+    """
+    replicate_activity = compute_replicate_log2_activity(readcount_file, pseudocount=pseudocount)
+    if min_barcodes is not None:
+        replicate_activity = filter_threshold(replicate_activity, min_barcodes)
+
+    states = ['Leaf', 'MG', 'Br', 'RR']
+    pairs = [(1, 2), (1, 3), (2, 3)]
+
+    correlations = {}
+    for state in states:
+        pairwise = {
+            f'{rep_a}v{rep_b}': replicate_activity[f'{state}-{rep_a}'].corr(
+                replicate_activity[f'{state}-{rep_b}'], method=method
+            )
+            for rep_a, rep_b in pairs
+        }
+        correlations[state] = {
+            'pairwise': pairwise,
+            'mean': float(np.mean(list(pairwise.values()))),
+        }
+        print(f"{state}: mean replicate correlation = {correlations[state]['mean']:.4f} (pairwise: {pairwise})")
+
+    return correlations
+
+
 def plot_raw_vs_normalized_expression(raw, normalized):
     tissues = ["Leaf", "MG", "Br", "RR"]
     colors = ["#2ecc71", "#e74c3c", "#e67e22", "#e74c3c"]
@@ -272,7 +506,7 @@ def plot__overall_distribution(data, barcode_thresh): #plots one combined datase
                                linewidth=2.5, alpha=0.8)
                 
     plt.title(f'Overall Distribution (Barcode Threshold: {barcode_thresh})', fontsize=12, fontweight='bold')
-    plt.xlabel('Expression (log2 (RNA/DNA + 0.1))', fontsize=10)
+    plt.xlabel('Expression (log2 (RNA norm/DNA norm), Pseudocount = 1)', fontsize=10)
     plt.ylabel('Density', fontsize=10)
     plt.legend(loc='upper right', fontsize=8)
         
@@ -284,8 +518,8 @@ def plot__overall_distribution(data, barcode_thresh): #plots one combined datase
             ax.axvline(median_val, color=color, linestyle='--', 
                         alpha=0.7, linewidth=1)
             
-    plt.savefig(f'results/plots/allchromosomes{barcode_thresh}thresh.png', dpi=300) 
-    plt.close(fig)
+    #plt.savefig(f'results/plots/allchromosomes{barcode_thresh}thresh.png', dpi=300) 
+    #plt.close(fig)
    
 
 
@@ -314,7 +548,7 @@ def plot_chrom_distributions(chromosomes, barcode_thresh): #plots distributions 
                                linewidth=2.5, alpha=0.8)
                 
         ax.set_title(f'{chrom} (n={len(chrom_data)})', fontsize=12, fontweight='bold')
-        ax.set_xlabel('Expression log2(RNA/DNA + 0.1)', fontsize=10)
+        ax.set_xlabel('Expression (log2 (RNA norm/DNA norm), Pseudocount = 1)', fontsize=10)
         ax.set_ylabel('Density', fontsize=10)
         ax.legend(loc='upper right', fontsize=8)
         ax.grid(True, alpha=0.3)
@@ -331,7 +565,7 @@ def plot_chrom_distributions(chromosomes, barcode_thresh): #plots distributions 
                  fontsize=16, fontweight='bold', y=0.995)
     plt.tight_layout()
           
-    plt.savefig(f'results/plots/indiv_chromosomes{barcode_thresh}thresh.png', dpi=300)   
+    #plt.savefig(f'results/plots/indiv_chromosomes{barcode_thresh}thresh.png', dpi=300)   
 
 def select_chromosomes(chromosome_list, all_data): #takes in tsv of all_data and then just returns data associated with chromosome list
     filtered_df = all_data[all_data['Chr'].isin(chromosome_list)]
@@ -378,13 +612,19 @@ def leaf_activity_diff(
 
 
 def main():
-    metadata_path = "/home/kachu/alphagenome-encoder-ft/metadata"
+    #metadata_path = "/home/kachu/alphagenome-encoder-ft/metadata"
+    metadata_path = "/grid/koo/home/kachu/projects/alphagenome-encoder-ft/metadata"
+
     
     mpra_activity_file = metadata_path + "/Supplementary Full Dataset 2.xlsx"
     sequences_file = metadata_path + "/Supplementary Data Set 1.xlsx"
     deng_train = metadata_path + "/train.txt"
     log_2_activity = metadata_path + "/all_log2_activity.tsv"
     deng_test = metadata_path + "/test.txt"
+    active_readcount_file = metadata_path + "/Supplementary Dataset 2-ReadCount-RPM-ratio-log2ratio.xlsx"
+    log2_pseudocounted_file = metadata_path + "/log2_pseudocounted.xlsx"
+    full_readcount_file = metadata_path + "/RNA DNA ReadCount All.xlsx"
+
     
     #differences in leaf activity
     # untransformed_diffs = pd.DataFrame(leaf_activity_diff(deng_test, log_2_activity)).transpose()
@@ -393,23 +633,26 @@ def main():
     # with pd.option_context("display.precision", 15):
     #     print(untransformed_diffs)
 
-    all_data = excel_to_tsv(mpra_activity_file, sequences_file, False) #true that you want the std log2 and not the pseudocount
-    imputation_dict = write_imputation_dict(mpra_activity_file, deng_train, deng_test, metadata_path + "/imputation_dict.json") #this stays the same
-    write_imputed_activity_tsv(all_data, imputation_dict, metadata_path + "/all_log2_activity_imputed.tsv")
+    #load_pseudocount_log2(log2_pseudocounted_file, sequences_file, active_readcount_file, metadata_path + "/pseudocounted_log2.tsv")
+    all_data = compute_pseudocount_log2_from_readcounts(full_readcount_file, sequences_file, metadata_path + "/full_pseudocount_log2.tsv", pseudocount=1)
+
+    # all_data = excel_to_tsv(mpra_activity_file, sequences_file, False) #true that you want the std log2 and not the pseudocount
+    # imputation_dict = write_imputation_dict(mpra_activity_file, deng_train, deng_test, metadata_path + "/imputation_dict.json") #this stays the same
+    # write_imputed_activity_tsv(all_data, imputation_dict, metadata_path + "/all_log2_activity_imputed.tsv")
 
     #compare_zero_processing(mpra_activity_file, deng_train, deng_test, 'Leaf')
     
 
-    # barcode_threshold = 10
-    # above_ten_thresh = filter_threshold(all_data, barcode_threshold) #start with >= 10 unique barcodes
-    # chrom_dict, val_chrom, test_chrom, chrom_percentages = split_chroms(above_ten_thresh) #this is the strict >=10 set
+    barcode_threshold = 10
+    above_ten_thresh = filter_threshold(all_data, barcode_threshold) #start with >= 10 unique barcodes
+    chrom_dict, val_chrom, test_chrom, chrom_percentages = split_chroms(above_ten_thresh) #this is the strict >=10 set
 
     # save_splits(above_ten_thresh, metadata_path + "/10_barcode_thresh")
     # write_chrom_percentages(chrom_dict, chrom_percentages, barcode_threshold, metadata_path + "/chromosome_readout_percentages")
     # #print(chrom_dict.keys())
 
-    # plot__overall_distribution(above_ten_thresh, barcode_threshold) #plot all the data
-    # plot_chrom_distributions(chrom_dict, barcode_threshold)
+    plot__overall_distribution(above_ten_thresh, barcode_threshold) #plot all the data
+    plot_chrom_distributions(chrom_dict, barcode_threshold)
 
     # barcode_threshold = 5
 

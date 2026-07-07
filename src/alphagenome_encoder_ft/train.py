@@ -32,6 +32,29 @@ def _default_loss_fn(preds: Tensor, targets: Tensor) -> Tensor:
     return F.mse_loss(preds.float(), targets.float())
 
 
+def _unpack_batch(batch: tuple[Tensor, ...]) -> tuple[Tensor, Tensor, Tensor | None]:
+    """Datasets may yield (sequences, targets) or (sequences, targets, sample_weight)."""
+    if len(batch) == 3:
+        return batch
+    sequences, targets = batch
+    return sequences, targets, None
+
+
+def _compute_loss( #per sample loss has a barcode-count weight during training only
+    preds: Tensor,
+    targets: Tensor,
+    weights: Tensor | None,
+    loss_fn: Callable[[Tensor, Tensor], Tensor],
+) -> Tensor:
+    if weights is None:
+        return loss_fn(preds, targets) #already has reduction as mean, so will give 1 scalar
+    # per-sample MSE, weighted by e.g. barcode-count confidence, then averaged.
+    per_sample = F.mse_loss(preds.float(), targets.float(), reduction="none") #(B, num_outputs)
+    if per_sample.ndim > 1:
+        per_sample = per_sample.mean(dim=tuple(range(1, per_sample.ndim))) #collapse over all dims other than batch
+    return (per_sample * weights).mean() #multiply per sample loss by barcode weight, average over batch
+
+
 def _pearson_r(preds: Tensor, targets: Tensor, eps: float = 1e-8) -> Tensor:
     preds = preds.float()
     targets = targets.float()
@@ -50,9 +73,9 @@ def _pearson_r_per_track(preds: Tensor, targets: Tensor, eps: float = 1e-8) -> l
     preds = preds.float()
     targets = targets.float()
     scores: list[float] = []
-    for track in range(preds.shape[1]):
-        r = _pearson_r(preds[:, track], targets[:, track], eps=eps)
-        scores.append(float(r.detach().cpu().item()))
+    for track in range(preds.shape[1]): #for each tissue type or condition
+        r = _pearson_r(preds[:, track], targets[:, track], eps=eps) #take all the preds & targets for N samples for 1 track
+        scores.append(float(r.detach().cpu().item())) #add this pearson to the list
     return scores
 
 
@@ -70,9 +93,23 @@ def _compute_metrics(
         metrics[name] = float(value)
 
     # multi-output heads (e.g. DeepSTARR dev+hk): also report per-track pearson.
-    per_track = _pearson_r_per_track(preds, targets)
-    for idx, score in enumerate(per_track):
-        metrics[f"pearson_track{idx}"] = score
+    per_track = _pearson_r_per_track(preds, targets) #his has the list of the pearson r's
+    if len(per_track) == 4: #four predictions
+        metrics["leaf_pearson"] = per_track[0]
+        metrics["MG_pearson"] = per_track[1]
+        metrics["Br_pearson"] = per_track[2]
+        metrics["RR_pearson"] = per_track[3]
+    elif len(per_track) == 2:
+        metrics["leaf_pearson"] = per_track[0]
+        metrics["fruit_pearson"] = per_track[1]
+    else:
+        for idx, score in enumerate(per_track):
+            metrics[f"pearson_track{idx}"] = score
+
+    # mean of the per-condition pearsons -- matches train_deeptomato.py's mean_pearson
+    # (mean of independently-computed per-tissue Pearson correlations)
+    if per_track and "pearson" in metrics:
+        metrics["pearson"] = sum(per_track) / len(per_track)
     return metrics
 
 
@@ -98,7 +135,7 @@ def create_optimizer(
     return AdamW(params, lr=lr, weight_decay=optim_config.weight_decay)
 
 
-def create_scheduler(
+def create_scheduler( #optimizes the learning rate as the model 
     optim_config: OptimConfig,
     optimizer: torch.optim.Optimizer,
     total_epochs: int,
@@ -158,7 +195,7 @@ def train_epoch(
         model.train()
     else:
         model.eval()
-        model.head.train()
+        model.head.train() #just train the head
 
     total_loss = 0.0
     total_samples = 0
@@ -177,23 +214,25 @@ def train_epoch(
             leave=False,
         )
 
-    for batch_idx, (sequences, targets) in enumerate(batch_iterator, start=1):
+    for batch_idx, batch in enumerate(batch_iterator, start=1):
+        sequences, targets, weights = _unpack_batch(batch)
         sequences = sequences.to(device)
         targets = targets.to(device).float()
+        weights = weights.to(device).float() if weights is not None else None
         organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=device)
         autocast_ctx = _autocast_context(device, use_amp)
 
         if train_encoder:
             with autocast_ctx:
                 preds = model(sequences, organism_idx)
-                loss = loss_fn(preds, targets)
+                loss = _compute_loss(preds, targets, weights, loss_fn)
         else:
             with torch.no_grad():
                 with autocast_ctx:
                     encoder_output = model.encode(sequences, organism_idx)
             with autocast_ctx:
                 preds = model.predict_from_encoder(encoder_output)
-                loss = loss_fn(preds, targets)
+                loss = _compute_loss(preds, targets, weights, loss_fn)
 
         (loss / gradient_accumulation_steps).backward()
 
@@ -244,7 +283,8 @@ def evaluate(
     all_preds: list[Tensor] = []
     all_targets: list[Tensor] = []
 
-    for sequences, targets in data_loader:
+    for batch in data_loader:
+        sequences, targets, _weights = _unpack_batch(batch)
         sequences = sequences.to(device)
         targets = targets.to(device).float()
         organism_idx = torch.zeros(sequences.shape[0], dtype=torch.long, device=device)
@@ -352,6 +392,30 @@ def _append_stage_history(history: dict[str, list[float]], stage_history: dict[s
         history.setdefault(key, []).extend(values)
 
 
+def _format_metric_parts(prefix: str, metrics: dict[str, float]) -> list[str]:
+    """Format every metric (loss, pearson, and any per-track pearson_trackN) as
+    "{prefix}_{key}=value", so multi-output heads aren't silently collapsed to
+    just the pooled "pearson" key."""
+    parts = [f"{prefix}_loss={metrics['loss']:.4f}"]
+    for key in sorted(metrics):
+        if key == "loss":
+            continue
+        parts.append(f"{prefix}_{key}={metrics[key]:.4f}")
+    return parts
+
+
+def _add_metrics_to_payload(payload: dict[str, Any], prefix: str, metrics: dict[str, float]) -> None:
+    for key, value in metrics.items():
+        payload[f"{prefix}_{key}"] = value
+
+
+def add_metrics_to_history(history: dict[str, list[float]], prefix: str, metrics: dict[str, float]) -> None:
+    for key, value in metrics.items():
+        if key in {"loss", "pearson"}:
+            continue  # already tracked under the fixed f"{prefix}_loss"/f"{prefix}_pearson" keys
+        history.setdefault(f"{prefix}_{key}", []).append(value)
+
+
 def run_training_stage(
     model: AlphaGenomeEncoderModel,
     train_loader,
@@ -372,7 +436,12 @@ def run_training_stage(
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
     show_progress: bool = False,
 ) -> dict[str, Any]:
-    """Run a single training stage."""
+    """Run a single training stage.
+
+    Early stopping and best-checkpoint selection are driven by (mean, across-condition)
+    pearson -- higher is better -- mirroring train_deeptomato.py's mean_pearson
+    selection, rather than validation loss.
+    """
 
     device = torch.device(device)
     scheduler_step = scheduler_step or _default_scheduler_step
@@ -381,7 +450,7 @@ def run_training_stage(
         stage_dir.mkdir(parents=True, exist_ok=True)
 
     history = _history_template()
-    best_monitor = math.inf
+    best_monitor = -math.inf
     best_epoch: float = float(start_epoch)
     best_checkpoint_path: Path | None = None
     evals_without_improvement = 0
@@ -427,10 +496,11 @@ def run_training_stage(
             history["val_loss"].append(val_metrics["loss"])
             history["val_pearson"].append(val_metrics.get("pearson", float("nan")))
             history["val_epoch"].append(float(current_epoch))
+            add_metrics_to_history(history, "val", val_metrics)
             latest_eval_metrics = val_metrics
 
-            if val_metrics["loss"] < best_monitor:
-                best_monitor = val_metrics["loss"]
+            if val_metrics["pearson"] > best_monitor:
+                best_monitor = val_metrics["pearson"]
                 best_epoch = float(current_epoch)
                 evals_without_improvement = 0
                 if stage_dir is not None:
@@ -469,11 +539,12 @@ def run_training_stage(
         history["train_loss"].append(train_metrics["loss"])
         history["train_pearson"].append(train_metrics.get("pearson", float("nan")))
         history["train_epoch"].append(float(epoch_number))
+        add_metrics_to_history(history, "train", train_metrics)
 
         if val_loader is None:
             latest_eval_metrics = {"loss": train_metrics["loss"]}
-            if train_metrics["loss"] < best_monitor:
-                best_monitor = train_metrics["loss"]
+            if train_metrics["pearson"] > best_monitor:
+                best_monitor = train_metrics["pearson"]
                 best_epoch = float(epoch_number)
                 evals_without_improvement = 0
                 if stage_dir is not None:
@@ -491,26 +562,17 @@ def run_training_stage(
 
         scheduler_step(scheduler, latest_eval_metrics)
 
-        metrics_parts = [
-            f"[{stage}] epoch {epoch_number}",
-            f"train_loss={train_metrics['loss']:.4f}",
-            f"train_pearson={train_metrics.get('pearson', float('nan')):.4f}",
-        ]
+        metrics_parts = [f"[{stage}] epoch {epoch_number}"]
+        metrics_parts += _format_metric_parts("train", train_metrics)
         if val_metrics is not None:
-            metrics_parts.append(f"val_loss={val_metrics['loss']:.4f}")
-            metrics_parts.append(f"val_pearson={val_metrics.get('pearson', float('nan')):.4f}")
+            metrics_parts += _format_metric_parts("val", val_metrics)
         print(" | ".join(metrics_parts))
 
         if epoch_callback is not None:
-            payload: dict[str, Any] = {
-                "stage": stage,
-                "epoch": float(epoch_number),
-                "train_loss": train_metrics["loss"],
-                "train_pearson": train_metrics.get("pearson", float("nan")),
-            }
+            payload: dict[str, Any] = {"stage": stage, "epoch": float(epoch_number)}
+            _add_metrics_to_payload(payload, "train", train_metrics)
             if val_metrics is not None:
-                payload["val_loss"] = val_metrics["loss"]
-                payload["val_pearson"] = val_metrics.get("pearson", float("nan"))
+                _add_metrics_to_payload(payload, "val", val_metrics)
             epoch_callback(payload)
 
         if should_stop:
@@ -588,7 +650,7 @@ def run_two_stage_training(
         stage1_result = {
             "history": _history_template(),
             "best_epoch": 0,
-            "best_monitor": math.inf,
+            "best_monitor": -math.inf,
             "best_checkpoint_path": str(stage1_checkpoint),
         }
 

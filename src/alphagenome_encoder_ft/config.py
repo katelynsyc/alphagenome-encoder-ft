@@ -214,6 +214,12 @@ class RuntimeConfig:
 
 
 @dataclass
+class CachedEmbeddingsConfig:
+    use_cached_embeddings: bool = False
+    cache_file: str | None = None
+
+
+@dataclass
 class TrainConfig:
     data: DataConfig = field(default_factory=DataConfig)
     head: HeadConfig = field(default_factory=HeadConfig)
@@ -222,6 +228,7 @@ class TrainConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     runtime: RuntimeConfig = field(default_factory=RuntimeConfig)
+    cached_embeddings: CachedEmbeddingsConfig = field(default_factory=CachedEmbeddingsConfig)
 
     def validate(self) -> None:
         if not self.data.input_tsv:
@@ -248,13 +255,14 @@ class TrainConfig:
             "right_adapter": self.data.right_adapter_seq,
             "promoter_seq": self.data.promoter_seq,
             "barcode_seq": self.data.barcode_seq,
-            "construct_mode": self.data.construct_mode,
             "sequence_length": self.data.sequence_length,
         }
 
     @classmethod
     def from_dict(cls, raw_config: Mapping[str, Any]) -> "TrainConfig":
-        allowed_sections = {"data", "head", "optim", "stage", "checkpoint", "logging", "runtime"}
+        allowed_sections = {
+            "data", "head", "optim", "stage", "checkpoint", "logging", "runtime", "cached_embeddings",
+        }
         unknown_sections = sorted(
             key for key in set(raw_config) - allowed_sections if not str(key).startswith("_")
         )
@@ -271,6 +279,9 @@ class TrainConfig:
             ),
             logging=LoggingConfig(**dict(_ensure_mapping(raw_config.get("logging", {}), section="logging"))),
             runtime=RuntimeConfig(**dict(_ensure_mapping(raw_config.get("runtime", {}), section="runtime"))),
+            cached_embeddings=CachedEmbeddingsConfig(
+                **dict(_ensure_mapping(raw_config.get("cached_embeddings", {}), section="cached_embeddings"))
+            ),
         )
 
 

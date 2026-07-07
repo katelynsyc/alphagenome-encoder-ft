@@ -173,3 +173,30 @@ class DeepSTARRHead(MPRAHead):
             activation=activation,
             num_outputs=num_outputs,
         )
+
+class DengMPRAHead(MPRAHead):
+    """Dual-output regression head for tomato leaf and fruit tissue activity.
+
+    Mirrors Al Murphy's JAX ``DeepSTARRHead`` in ``alphagenome_ft_mpra/mpra_heads.py``:
+    same pooling modes, same configuration surface, same ``LayerNorm → MLP → Linear``
+    layout. Architecture and state_dict keys are inherited from :class:`MPRAHead`,
+    with ``num_outputs`` defaulted to 2 (``leaf``, ``fruit`` enhancer activity).
+    """
+
+    def __init__(
+        self,
+        pooling_type: PoolingType = "flatten",
+        center_bp: int = 256,
+        hidden_sizes: int | Sequence[int] = 2048,
+        dropout: float | None = 0.5,
+        activation: Literal["relu", "gelu"] = "relu",
+        num_outputs: int = 2,
+    ) -> None:
+        super().__init__(
+            pooling_type=pooling_type,
+            center_bp=center_bp,
+            hidden_sizes=hidden_sizes,
+            dropout=dropout,
+            activation=activation,
+            num_outputs=num_outputs,
+        )

@@ -21,6 +21,7 @@ from alphagenome_encoder_ft import (
     merge_train_config,
     parse_hidden_sizes,
     save_checkpoint,
+    load_checkpoint,
 )
 
 from deeptomato import DengConvModel, run_epoch, correlation_metrics, plot_scatterplot
@@ -314,13 +315,18 @@ def main() -> dict[str, Any]:
             )
 
             def wandb_epoch_logger(metrics: dict[str, Any]) -> None:
+                # `stage` is already "train" or "test" here, giving the two top-level
+                # wandb sections directly. `correlation_metrics()` prefixes its own keys
+                # with "val/" or "test/" -- strip that so we don't nest redundantly
+                # (e.g. avoid "train/val/Leaf_pearson", just "train/Leaf_pearson").
                 stage = str(metrics["stage"])
                 epoch = int(metrics["epoch"])
                 payload = {}
                 for key, value in metrics.items():
                     if key in {"stage", "epoch"}:
                         continue
-                    payload[f"{stage}/{key}"] = value
+                    clean_key = key.split("/", 1)[-1] if "/" in key else key
+                    payload[f"{stage}/{clean_key}"] = value
                 wandb.log(payload, step=epoch)
 
         except ImportError:
@@ -334,14 +340,14 @@ def main() -> dict[str, Any]:
     
 
     history: dict[str, list] = {"train_loss": [], "val_loss": []}
-    best_val, best_state, epochs_no_improve = float("-inf"), None, 0
+    best_val, best_checkpoint_path, epochs_no_improve = float("-inf"), None, 0
 
 
     for epoch in range(config.stage.num_epochs):
         tr_loss, _, _ = run_epoch(model, train_loader, loss_fn, optimizer, device, train=True)
         val_loss, vp, vt = run_epoch(model, val_loader, loss_fn, optimizer, device, train=False)
         corr = correlation_metrics(vp, vt, "val")
-        mean_pearson = float(np.mean([v for k, v in corr.items() if "pearson" in k])) #why is this mean? is this across conditions
+        mean_pearson = float(np.mean([v for k, v in corr.items() if "pearson" in k])) #why is this mean is this across conditions
 
         history["train_loss"].append(tr_loss)
         history["val_loss"].append(val_loss)
@@ -363,10 +369,17 @@ def main() -> dict[str, Any]:
         #     if epochs_no_improve >= config.stage.early_stopping_patience:
         #         print(f"Early stopping at epoch {epoch}")
         #         break
-        if mean_pearson > best_val: #using pearson to find what the best model is 
+        if mean_pearson > best_val: #using pearson to find what the best model is
             best_val = mean_pearson
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            torch.save(best_state, run_dir / "best_model.pt") #saves weights of the best model to disk file
+            best_checkpoint_path = save_checkpoint(
+                run_dir / "best_model.pt",
+                model,
+                config=config,
+                save_mode=config.checkpoint.save_mode,
+                stage="stage1",
+                epoch=epoch,
+                metrics={"val_loss": val_loss, "val_pearson": mean_pearson, **corr},
+            )
             epochs_no_improve = 0 #for early stopping if exceeds patience threshold
         else:
             epochs_no_improve += 1
@@ -374,7 +387,7 @@ def main() -> dict[str, Any]:
                 print(f"Early stopping at epoch {epoch}")
                 break
 
-    model.load_state_dict(best_state)
+    load_checkpoint(best_checkpoint_path, model, map_location=device)
     test_loss, tp, tt = run_epoch(model, test_loader, loss_fn, optimizer, device, train=False)
     #plot_scatterplot(tp, tt, "test") #plot predictions versus actual
     test_corr = correlation_metrics(tp, tt, "test")

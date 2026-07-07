@@ -34,6 +34,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=str, default=None)
 
     parser.add_argument("--input_tsv", type=str, default=None)
+    parser.add_argument("--train_txt", type=str, default=None)
+    parser.add_argument("--test_txt", type=str, default=None)
     parser.add_argument("--pretrained_weights", type=str, default=None)
     parser.add_argument("--checkpoint_dir", type=str, default=None)
     parser.add_argument("--save_mode", type=str, default=None, choices=["minimal", "full", "head"])
@@ -42,7 +44,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sequence_length", type=int, default=None)
     parser.add_argument("--barcode_min", type=int, default=None)
     parser.add_argument("--barcode_min_eval", type=int, default=None)
-    
+
     parser.add_argument(
         "--construct_mode",
         type=str,
@@ -57,12 +59,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reverse_complement", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--random_shift", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--val_chroms", type=str, nargs="+", default=None)
+    parser.add_argument("--test_chroms", type=str, nargs="+", default=None)
+    parser.add_argument("--weight_scheme", type=str, default=None, choices=["log", "sqrt", "lin", "none"])
+    parser.add_argument("--split_mode", type=str, default=None, choices=["chrom", "random", "deng"])
+    parser.add_argument("--train_frac", type=float, default=None)
+    parser.add_argument("--val_frac", type=float, default=None)
 
     parser.add_argument("--pooling_type", type=str, default=None, choices=["flatten", "center", "mean", "sum", "max"])
     parser.add_argument("--center_bp", type=int, default=None)
     parser.add_argument("--hidden_sizes", type=str, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--activation", type=str, default=None, choices=["relu", "gelu"])
+    parser.add_argument("--head_type", type=str, default=None, choices=["mpra", "deepstarr", "deeptomato"])
+    parser.add_argument("--num_outputs", type=int, default=None)
 
     parser.add_argument("--optimizer", type=str, default=None, choices=["adam", "adamw"])
     parser.add_argument("--learning_rate", type=float, default=None)
@@ -112,6 +122,8 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
 
     data_pairs = {
         "input_tsv": args.input_tsv,
+        "train_txt": args.train_txt,
+        "test_txt": args.test_txt,
         "batch_size": args.batch_size,
         "sequence_length": args.sequence_length,
         "barcode_min": args.barcode_min,
@@ -125,6 +137,12 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "subset_frac": args.subset_frac,
         "num_workers": args.num_workers,
         "pin_memory": args.pin_memory,
+        "val_chroms": args.val_chroms,
+        "test_chroms": args.test_chroms,
+        "weight_scheme": args.weight_scheme,
+        "split_mode": args.split_mode,
+        "train_frac": args.train_frac,
+        "val_frac": args.val_frac,
     }
     head_pairs = {
         "pooling_type": args.pooling_type,
@@ -132,6 +150,8 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "hidden_sizes": parse_hidden_sizes(args.hidden_sizes) if args.hidden_sizes is not None else None,
         "dropout": args.dropout,
         "activation": args.activation,
+        "head_type": args.head_type,
+        "num_outputs": args.num_outputs,
     }
     optim_pairs = {
         "optimizer": args.optimizer,
@@ -199,7 +219,8 @@ def _make_dataset(config: TrainConfig, split: str) -> PlantMPRADataset: #how do 
         subset_frac=config.data.subset_frac,
         seed=config.runtime.seed,
         val_chroms=config.data.val_chroms,
-        test_chroms=config.data.test_chroms
+        test_chroms=config.data.test_chroms,
+        weight_scheme=config.data.weight_scheme,
     )
 
 

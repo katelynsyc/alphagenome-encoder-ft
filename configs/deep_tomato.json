@@ -1,0 +1,76 @@
+{
+  "_comment": "TrainConfig-compatible config for DeepTOMATO tomato MPRA training.",
+  "_model_architecture": {
+    "input_shape": [4, 160],
+    "conv_layers": [
+      {"out_channels": 256, "kernel_size": 7, "activation": "relu", "padding": "same"},
+      {"out_channels": 128, "kernel_size": 5, "activation": "relu", "padding": "same"},
+      {"out_channels":  64, "kernel_size": 3, "activation": "relu", "padding": "same"}
+    ],
+    "pooling_size": 2,
+    "batch_normalization": true,
+    "output_activation": "linear",
+    "_note_data": "encoding=one_hot, nucleotide_order=[A,C,G,T], skip_character=N, input_column=Sequence, target_columns=[Leaf_activity, MG_activity,  Br_activity, RR_activity]"
+  },
+  "data": {
+    "input_tsv": null,
+    "sequence_length": 160,
+    "batch_size": 16,
+    "barcode_min": 10,
+    "barcode_min_eval": 10,
+    "reverse_complement": false,
+    "rc_prob": 0.5,
+    "random_shift": false,
+    "shift_prob": 0.5,
+    "max_shift": 20,
+    "subset_frac": 1.0,
+    "num_workers": 0,
+    "pin_memory": false,
+    "val_chroms": ["ch03"],
+    "test_chroms": ["ch06"],
+    "weight_scheme": "none",
+    "split_mode": "chrom",
+    "train_frac": 0.8,
+    "val_frac": 0.1,
+    "train_txt": "metadata/train.txt",
+    "test_txt": "metadata/test.txt"
+  },
+  "head": {
+    "head_type": "deeptomato",
+    "hidden_sizes": [256, 256],
+    "dropout": 0.5,
+    "activation": "relu",
+    "num_outputs": 2
+  },
+  "optim": {
+    "optimizer": "adam",
+    "learning_rate": 1e-3,
+    "weight_decay": 0.0,
+    "lr_scheduler": "constant",
+    "gradient_accumulation_steps": 1,
+    "gradient_clip": null
+  },
+  "stage": {
+    "num_epochs": 200,
+    "early_stopping_patience": 10,
+    "val_evals_per_epoch": 1,
+    "second_stage_lr": null,
+    "second_stage_epochs": 10,
+    "resume_from_stage2": false
+  },
+  "checkpoint": {
+    "pretrained_weights": null,
+    "checkpoint_dir": "./results/deeptomato",
+    "save_mode": "minimal"
+  },
+  "logging": {
+    "use_wandb": true,
+    "wandb_project": "plantmpra",
+    "wandb_name": "deeptomato"
+  },
+  "runtime": {
+    "device": null,
+    "use_amp": false,
+    "seed": 42
+  }
+}

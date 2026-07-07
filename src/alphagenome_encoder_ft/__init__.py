@@ -8,6 +8,7 @@ __all__ = [
     "CheckpointConfig",
     "LoggingConfig",
     "RuntimeConfig",
+    "CachedEmbeddingsConfig",
     "TrainConfig",
     "build_head",
     "load_train_config",
@@ -41,11 +42,16 @@ __all__ = [
     "create_optimizer",
     "create_scheduler",
     "scheduler_stepper",
+    "add_metrics_to_history",
 ]
 
 
 def __getattr__(name: str):
-    if name in {"PlantMPRADataset", "create_random_splits", "DengMPRADataset", "create_deng_splits"}:
+    if name in {"PlantMPRADataset",
+                 "create_random_splits",
+                "DengMPRADataset",
+                 "create_deng_splits",
+                "create_dataloader"}:
         from . import mydata
 
         return getattr(mydata, name)
@@ -54,7 +60,6 @@ def __getattr__(name: str):
         "DeepSTARRDataset",
         "DEEPSTARR_ADAPTER_UP",
         "DEEPSTARR_ADAPTER_DOWN",
-        "create_dataloader",
     }:
         from . import data
 
@@ -77,6 +82,7 @@ def __getattr__(name: str):
         "CheckpointConfig",
         "LoggingConfig",
         "RuntimeConfig",
+        "CachedEmbeddingsConfig",
         "TrainConfig",
         "build_head",
         "load_train_config",
@@ -105,6 +111,7 @@ def __getattr__(name: str):
         "create_optimizer",
         "create_scheduler",
         "scheduler_stepper",
+        "add_metrics_to_history",
     }:
         from . import train
 
