@@ -58,6 +58,59 @@ def excel_to_tsv(mpra_activity_file, sequences_file, pseudocount):
         #plot_raw_vs_normalized_expression(raw, normalized)
         return merged
 
+def acr_excel_to_tsv(excel_file, output_path, sheet_name='ACR sequence library'):
+    """Extract the ACR sequence library sheet (media-3.xlsx) into a tsv with
+    columns: id, orientation, light, dark, warm, cold, maize, chromosome,
+    start, end, GC content (%), sequence. The sheet has a title/description
+    in the first rows and a merged 'log2(enhancer strength)' group header,
+    so the real column names live on the row right above the data.
+    """
+    df = pd.read_excel(excel_file, sheet_name=sheet_name, header=4)
+    cols = ['id', 'orientation', 'light', 'dark', 'warm', 'cold', 'maize',
+            'chromosome', 'GC content (%)', 'sequence'] #might need GC content?
+    df = df[cols]
+    df.to_csv(output_path, sep='\t', index=False)
+    print(f"Wrote {df.shape[0]} rows to {output_path}")
+    return df
+
+def count_na_per_condition(excel_file, sheet_name='ACR sequence library'):
+    """Print the number (and %) of N/A log2(enhancer strength) values per
+    condition (light, dark, warm, cold, maize) in the ACR sequence library sheet.
+    """
+    df = pd.read_excel(excel_file, sheet_name=sheet_name, header=4)
+    conditions = ['light', 'dark', 'warm', 'cold', 'maize']
+    na_counts = {}
+    print(f"Total rows: {len(df)}")
+    for cond in conditions:
+        na_count = df[cond].isna().sum()
+        na_counts[cond] = na_count
+        print(f"{cond}: {na_count} NA values ({na_count / len(df) * 100:.2f}%)")
+    return na_counts
+
+def count_rows_by_na_amount(excel_file, sheet_name='ACR sequence library'):
+    """Print how many rows have exactly 0, 1, 2, 3, 4, or 5 N/A condition
+    values (light, dark, warm, cold, maize) and how many have at least that
+    many, in the ACR sequence library sheet.
+    """
+    df = pd.read_excel(excel_file, sheet_name=sheet_name, header=4)
+    conditions = ['light', 'dark', 'warm', 'cold', 'maize']
+    na_per_row = df[conditions].isna().sum(axis=1)
+
+    exact_counts = {}
+    print(f"Total rows: {len(df)}")
+    for n in range(len(conditions) + 1):
+        count = int((na_per_row == n).sum())
+        exact_counts[n] = count
+        print(f"{n} NAs: {count} rows ({count / len(df) * 100:.2f}%)")
+
+    at_least_counts = {}
+    for n in range(1, len(conditions) + 1):
+        count = int((na_per_row >= n).sum())
+        at_least_counts[n] = count
+        print(f">= {n} NAs: {count} rows ({count / len(df) * 100:.2f}%)")
+
+    return exact_counts, at_least_counts
+
 def load_pseudocount_log2(log2_excel, sequences_file, readcount_file, output_path=None):
     """Attach Chr, Sequence, Unique Barcodes to a pseudocount log2 activity table
     (Fragment, Leaf, Fruit, MG, Br, RR) by looking them up per-Fragment.
@@ -217,18 +270,25 @@ def compute_pseudocount_log2_from_readcounts(readcount_file, sequences_file, out
     return result
 
 
-def compute_replicate_log2_activity(readcount_file, pseudocount=1):
+def compute_replicate_log2_activity(readcount_file, pseudocount=1, include_pooled_fruit=True):
     """Compute per-replicate log2(RNA_norm/DNA_norm) activity, one column per (state, replicate)
     e.g. 'Leaf-1', 'Leaf-2', 'Leaf-3', 'MG-1', ... -- using a shared pooled DNA normalization
     (summed across the 3 DNA replicates) as the denominator for every RNA replicate. This mirrors
     compute_pseudocount_log2_from_readcounts's DNA-side normalization, just without summing the
     RNA replicates together first, so each replicate keeps its own activity value.
+
+    If include_pooled_fruit is True, also adds 'Fruit-1', 'Fruit-2', 'Fruit-3' columns: for each
+    replicate index, MG/Br/RR's counts and totals at that same replicate index are pooled together
+    (mirroring how compute_pseudocount_log2_from_readcounts pools all 9 MG+Br+RR libraries into a
+    single 'Fruit' condition), giving 3 pooled-fruit-stage replicate values that can be correlated
+    against each other to get a reliability ceiling for the pooled Fruit condition itself.
     """
     data = pd.read_excel(readcount_file, header=[0, 1])
     fragment_col = ('Unnamed: 0_level_0', 'Fragment')
     data = data[data[fragment_col] != '35S enhancer'].reset_index(drop=True)  # control row, not a real fragment
 
     states = ['Leaf', 'MG', 'Br', 'RR']
+    fruit_states = ['MG', 'Br', 'RR']
     replicates = [1, 2, 3]
 
     def library_total(count_group, rpm_group, library):
@@ -244,19 +304,46 @@ def compute_replicate_log2_activity(readcount_file, pseudocount=1):
     dna_norm = (dna_count_sum + pseudocount) / dna_total_sum * 1e6  # shared across every state/replicate
 
     result = pd.DataFrame({'Fragment': data[fragment_col]})
+    rna_counts = {}  # (state, rep) -> raw counts, kept around to pool into Fruit-{rep} below
+    rna_totals = {}  # (state, rep) -> library total
     for state in states:
         for rep in replicates:
             library = f'{state}-{rep}'
             total = library_total('RNA-seq (ReadCount)', 'RNA-seq (RPM)', library)
-            rna_norm = (data[('RNA-seq (ReadCount)', library)] + pseudocount) / total * 1e6
+            counts = data[('RNA-seq (ReadCount)', library)]
+            rna_counts[(state, rep)] = counts
+            rna_totals[(state, rep)] = total
+            rna_norm = (counts + pseudocount) / total * 1e6
             result[library] = np.log2(rna_norm / dna_norm)
+
+    if include_pooled_fruit:
+        for rep in replicates:
+            pooled_count = sum(rna_counts[(state, rep)] for state in fruit_states)
+            pooled_total = sum(rna_totals[(state, rep)] for state in fruit_states)
+            pooled_norm = (pooled_count + pseudocount) / pooled_total * 1e6
+            result[f'Fruit-{rep}'] = np.log2(pooled_norm / dna_norm)
 
     result['Unique Barcodes'] = data[('RNA-seq (ReadCount)', 'Unique barcodes recovered from RNA-seq libraries')]
 
     return result
 
 
-def compute_replicate_correlations(readcount_file, pseudocount=1, method='pearson', min_barcodes=None):
+def _spearman_brown_ceiling(pairwise_rs, n_replicates):
+    """Collapse several pairwise single-replicate correlations into the reliability
+    ceiling for the n_replicates-pooled measurement.
+
+    The Spearman-Brown prophecy formula (n*r / (1 + (n-1)*r)) takes a single
+    single-replicate reliability r, so the pairwise r's are first collapsed into one
+    representative r via a Fisher z-transform average (arctanh -> mean -> tanh), which
+    is the statistically correct way to average correlations -- the plain arithmetic
+    mean of r's is slightly biased low.
+    """
+    z_mean = np.mean(np.arctanh(pairwise_rs))
+    r_mean = np.tanh(z_mean)
+    return (n_replicates * r_mean) / (1 + (n_replicates - 1) * r_mean)
+
+
+def compute_replicate_correlations(readcount_file, pseudocount=1, method='pearson', min_barcodes=None, spearman_brown=False, include_pooled_fruit=False):
     """For each triplicate condition (Leaf, MG, Br, RR), compute the pairwise correlation
     between every pair of replicates' log2(RNA/DNA) activity values (1v2, 1v3, 2v3), then
     average those three pairwise correlations into a single per-condition replicate
@@ -265,14 +352,25 @@ def compute_replicate_correlations(readcount_file, pseudocount=1, method='pearso
     method is passed straight to pd.Series.corr ('pearson', 'spearman', or 'kendall').
     min_barcodes, if given, restricts to fragments with Unique Barcodes >= min_barcodes
     before correlating (same threshold semantics as filter_threshold).
+    spearman_brown, if True, also reports the Spearman-Brown corrected reliability ceiling
+    for the 3-replicate-pooled measurement (see _spearman_brown_ceiling) -- this is the
+    correct noise ceiling to compare a model's pearson against, since the model is scored
+    against the pooled/mean-of-3-replicates target, not against a single noisy replicate.
+    include_pooled_fruit, if True, adds a 'Fruit' condition built from MG/Br/RR pooled
+    together within each replicate index (see compute_replicate_log2_activity), so its
+    reliability ceiling can be compared directly against the individual MG/Br/RR ceilings --
+    this is the ceiling relevant to a model trained against the single pooled Fruit target
+    rather than the three separate developmental stages.
 
-    Returns {state: {'pairwise': {'1v2': r, '1v3': r, '2v3': r}, 'mean': avg_r}}.
+    Returns {state: {'pairwise': {'1v2': r, '1v3': r, '2v3': r}, 'mean': avg_r
+                      [, 'spearman_brown': ceiling]}}.
     """
-    replicate_activity = compute_replicate_log2_activity(readcount_file, pseudocount=pseudocount)
+    replicate_activity = compute_replicate_log2_activity(readcount_file, pseudocount=pseudocount, include_pooled_fruit=include_pooled_fruit)
     if min_barcodes is not None:
         replicate_activity = filter_threshold(replicate_activity, min_barcodes)
 
-    states = ['Leaf', 'MG', 'Br', 'RR']
+    states = ['Leaf', 'MG', 'Br', 'RR'] + (['Fruit'] if include_pooled_fruit else [])
+    n_replicates = 3
     pairs = [(1, 2), (1, 3), (2, 3)]
 
     correlations = {}
@@ -287,9 +385,67 @@ def compute_replicate_correlations(readcount_file, pseudocount=1, method='pearso
             'pairwise': pairwise,
             'mean': float(np.mean(list(pairwise.values()))),
         }
-        print(f"{state}: mean replicate correlation = {correlations[state]['mean']:.4f} (pairwise: {pairwise})")
+        message = f"{state}: mean replicate correlation = {correlations[state]['mean']:.4f} (pairwise: {pairwise})"
+
+        if spearman_brown:
+            ceiling = _spearman_brown_ceiling(list(pairwise.values()), n_replicates=n_replicates)
+            correlations[state]['spearman_brown'] = float(ceiling)
+            message += f" | Spearman-Brown ceiling (n={n_replicates}) = {ceiling:.4f}"
+
+        print(message)
 
     return correlations
+
+
+def plot_replicate_ceiling_bar(readcount_file, states, thresholds=(5, 10), pseudocount=1, method='pearson',
+                                title=None, output_path=None):
+    """Grouped bar chart of the Spearman-Brown-corrected replicate correlation ceiling
+    (compute_replicate_correlations(..., spearman_brown=True)) for each condition in
+    states, with one bar per barcode threshold in thresholds side by side per condition.
+
+    Pass states=['Leaf', 'MG', 'Br', 'RR'] for the per-developmental-stage ceilings, or
+    states=['Leaf', 'Fruit'] for the pooled-Fruit-condition ceiling instead (Fruit is
+    automatically included/pooled via compute_replicate_log2_activity's include_pooled_fruit
+    when 'Fruit' is present in states).
+    """
+    threshold_colors = ['forestgreen', 'lightgreen']
+    include_pooled_fruit = 'Fruit' in states
+
+    ceilings = {}
+    for threshold in thresholds:
+        correlations = compute_replicate_correlations(
+            readcount_file, pseudocount=pseudocount, method=method,
+            min_barcodes=threshold, spearman_brown=True, include_pooled_fruit=include_pooled_fruit,
+        )
+        ceilings[threshold] = [correlations[state]['spearman_brown'] for state in states]
+
+    x = np.arange(len(states))
+    n_thresholds = len(thresholds)
+    width = 0.8 / n_thresholds
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for i, threshold in enumerate(thresholds):
+        offset = (i - (n_thresholds - 1) / 2) * width
+        bars = ax.bar(
+            x + offset, ceilings[threshold], width,
+            color=threshold_colors[i % len(threshold_colors)],
+            label=f'>= {threshold} barcodes',
+        )
+        for bar, value in zip(bars, ceilings[threshold]):
+            ax.text(bar.get_x() + bar.get_width() / 2, value + 0.01, f'{value:.2f}',
+                    ha='center', va='bottom', fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(states)
+    ax.set_ylabel('Spearman-Brown corrected replicate correlation ceiling')
+    ax.set_title(title or f"Replicate Correlation Ceiling by Barcode Threshold ({', '.join(states)})")
+    ax.set_ylim(0, max(v for values in ceilings.values() for v in values) * 1.15)  # headroom for value labels
+    ax.legend(loc='upper left', fontsize=8)
+
+    plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path, dpi=300)
+    return fig
 
 
 def plot_raw_vs_normalized_expression(raw, normalized):
@@ -490,7 +646,7 @@ def write_chrom_percentages(chromosomes, chrom_percentages, barcode_threshold, o
     with open(output_path, 'w') as f:
         f.write("\n".join(lines) + "\n")
 
-def plot__overall_distribution(data, barcode_thresh): #plots one combined dataset of the gene expresion
+def plot__overall_distribution(data, barcode_thresh=None): #plots one combined dataset of the gene expresion
     fig, ax = plt.subplots(figsize=(10, 6))
     # define conditions and colors
     conditions = ['Leaf', 'MG', 'Br', 'RR']
@@ -504,9 +660,13 @@ def plot__overall_distribution(data, barcode_thresh): #plots one combined datase
                 # plot density/histogram
                 values.plot.kde(ax=ax, label=condition, color=color, 
                                linewidth=2.5, alpha=0.8)
-                
-    plt.title(f'Overall Distribution (Barcode Threshold: {barcode_thresh})', fontsize=12, fontweight='bold')
-    plt.xlabel('Expression (log2 (RNA norm/DNA norm), Pseudocount = 1)', fontsize=10)
+
+    if barcode_thresh is not None:
+        plt.title(f'Overall Distribution (Barcode Threshold: {barcode_thresh})', fontsize=12, fontweight='bold')
+    else:
+        plt.title(f'Overall Distribution)', fontsize=12, fontweight='bold')
+   
+    plt.xlabel('Expression (log2 (RNA norm/DNA norm))', fontsize=10)
     plt.ylabel('Density', fontsize=10)
     plt.legend(loc='upper right', fontsize=8)
         
@@ -523,7 +683,7 @@ def plot__overall_distribution(data, barcode_thresh): #plots one combined datase
    
 
 
-def plot_chrom_distributions(chromosomes, barcode_thresh): #plots distributions of each chromosome to visualize if there is enough dynamic range
+def plot_chrom_distributions(chromosomes, barcode_thresh=None): #plots distributions of each chromosome to visualize if there is enough dynamic range
     sns.set_style("whitegrid")
     
     # define conditions and colors
@@ -560,12 +720,120 @@ def plot_chrom_distributions(chromosomes, barcode_thresh): #plots distributions 
                 median_val = values.median()
                 ax.axvline(median_val, color=color, linestyle='--', 
                           alpha=0.7, linewidth=1)
-    
-    plt.suptitle(f'Gene Expression Distribution by Chromosome and Condition (Barcode Threshold: {barcode_thresh})', 
+    if barcode_thresh is not None: 
+        plt.suptitle(f'Gene Expression Distribution by Chromosome and Condition (Barcode Threshold: {barcode_thresh})', 
                  fontsize=16, fontweight='bold', y=0.995)
-    plt.tight_layout()
+        plt.tight_layout()
+        plt.savefig(f'results/plots/indiv_chromosomes{barcode_thresh}thresh.png', dpi=300) 
+    else:
+        plt.suptitle(f'Gene Expression Distribution by Chromosome and Condition)', 
+                 fontsize=16, fontweight='bold', y=0.995)
+        plt.tight_layout()
+        plt.savefig(f'results/plots/indiv_chromosomes.png', dpi=300) 
+    
           
     #plt.savefig(f'results/plots/indiv_chromosomes{barcode_thresh}thresh.png', dpi=300)   
+
+def plot_acr_overall_distribution(data, title=None, output_path=None): #plots one combined dataset of the ACR log2(enhancer strength) values, mirrors plot__overall_distribution
+    fig, ax = plt.subplots(figsize=(10, 6))
+    conditions = ['light', 'dark', 'warm', 'cold', 'maize']
+    colors = ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7']  # blue, aqua, yellow, green, violet
+
+    for condition, color in zip(conditions, colors):
+        values = data[condition].dropna()
+        if len(values) > 0:
+            values.plot.kde(ax=ax, label=condition, color=color,
+                           linewidth=2.5, alpha=0.8)
+
+    plt.title(title or 'ACR Sequence Library: Overall Distribution', fontsize=12, fontweight='bold')
+    plt.xlabel('log2(enhancer strength)', fontsize=10)
+    plt.ylabel('Density', fontsize=10)
+    plt.legend(loc='upper right', fontsize=8)
+
+    # add median lines
+    for condition, color in zip(conditions, colors):
+        values = data[condition].dropna()
+        if len(values) > 0:
+            median_val = values.median()
+            ax.axvline(median_val, color=color, linestyle='--',
+                        alpha=0.7, linewidth=1)
+
+    plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path, dpi=300)
+    return fig
+
+
+def plot_acr_distribution_by_split(data, output_path=None): #plots modelling_data_tamsACR.tsv's log2 enrichment: one overall panel plus one panel per train/val/test 'set' value, each with all five conditions overlaid
+    sns.set_style("whitegrid")
+
+    conditions = ['enrichment_light', 'enrichment_dark', 'enrichment_warm', 'enrichment_cold', 'enrichment_maize']
+    labels = ['light', 'dark', 'warm', 'cold', 'maize']
+    colors = ['#2a78d6', '#1baf7a', '#eda100', '#008300', '#4a3aa7']  # blue, aqua, yellow, green, violet
+
+    panels = [('Overall', data)] + [
+        (split_name.capitalize(), data[data['set'] == split_name]) for split_name in ('train', 'val', 'test')
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
+
+    for ax, (panel_name, panel_data) in zip(axes, panels):
+        for condition, label, color in zip(conditions, labels, colors):
+            values = panel_data[condition].dropna()
+            if len(values) > 0:
+                values.plot.kde(ax=ax, label=label, color=color,
+                               linewidth=2.5, alpha=0.8)
+
+        ax.set_title(f'{panel_name} (n={len(panel_data)})', fontsize=12, fontweight='bold')
+        ax.set_xlabel('log2 enrichment', fontsize=10)
+        ax.set_ylabel('Density', fontsize=10)
+        ax.legend(loc='upper right', fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+        # add median lines
+        for condition, label, color in zip(conditions, labels, colors):
+            values = panel_data[condition].dropna()
+            if len(values) > 0:
+                median_val = values.median()
+                ax.axvline(median_val, color=color, linestyle='--',
+                          alpha=0.7, linewidth=1)
+
+    plt.suptitle('ACR Modelling Data: log2 Enrichment Distribution by Condition and Split',
+                 fontsize=16, fontweight='bold', y=0.995)
+    plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path, dpi=300)
+    return fig
+
+def find_condition_diff(data, condition_1, condition_2, output_path=None):
+    df = pd.read_csv(data, sep='\t')
+    cond1 = df[condition_1]
+    cond2 = df[condition_2]
+    
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    plt.figure(figsize=(8, 8))
+    plt.scatter(cond1, cond2, alpha=0.5, s=10)
+
+    # Add diagonal line (y=x) - where warm == cold
+    min_val = min(cond1.min(), cond2.min())
+    max_val = max(cond1.max(), cond2.max())
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', label='No difference')
+
+    plt.xlabel(f'{condition_1} (log2)')
+    plt.ylabel(f'{condition_2} (log2)')
+    plt.title('Condition Difference Impact on Expression')
+    plt.legend()
+    plt.axis('equal')
+    plt.grid(True, alpha=0.3)
+    plt.savefig(output_path, dpi=300)
+
+    largest_diff_ind = (abs(df[condition_1] - df[condition_2])).idxmax()
+    diff = df[condition_1][largest_diff_ind] - df[condition_2][largest_diff_ind]
+    seq_id = df['id'][largest_diff_ind]
+    print(f"Largest difference for {condition_1} and {condition_2} is {seq_id} at {diff}")
 
 def select_chromosomes(chromosome_list, all_data): #takes in tsv of all_data and then just returns data associated with chromosome list
     filtered_df = all_data[all_data['Chr'].isin(chromosome_list)]
@@ -653,6 +921,14 @@ def main():
 
     plot__overall_distribution(above_ten_thresh, barcode_threshold) #plot all the data
     plot_chrom_distributions(chrom_dict, barcode_threshold)
+
+    # ACR sequence library: overall light/dark/warm/cold/maize distribution
+    acr_data = pd.read_csv(metadata_path + "/acr_sequence_library.tsv", sep='\t')
+    plot_acr_overall_distribution(acr_data, output_path="results/plots/acr_overall_distribution.png")
+
+    # ACR modelling data: overall + train/val/test split distributions (5 conditions each)
+    acr_split_data = pd.read_csv(metadata_path + "/modelling_data_tamsACR.tsv", sep='\t')
+    plot_acr_distribution_by_split(acr_split_data, output_path="results/plots/acr_distribution_by_split.png")
 
     # barcode_threshold = 5
 

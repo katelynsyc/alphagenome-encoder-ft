@@ -17,6 +17,8 @@ from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 #MPRA library adapters from Deng et al.https://doi.org/10.1093/plcell/koaf236
 TOMATO_ADAPTER_UP = "ACTCACTATAGGGCGAATTG" #5' adapter seq for fwd
 TOMATO_ADAPTER_DOWN = "GAAGTTCATTTCATTTGGAG" #3' adapter seq
+JORES_ADAPTER_UP = "GAGCGGTCTCCACTC"
+JORES_ADAPTER_DOWN = "CTGTAGAGACCGGGC"
 
 def _reverse_complement_onehot(onehot: np.ndarray) -> np.ndarray:
     return onehot[::-1, :][:, [3, 2, 1, 0]] #reverses sequence, then finds complements
@@ -32,7 +34,10 @@ def _compute_barcode_weights(barcodes: np.ndarray, scheme: str ="log", cap: floa
 
     scheme : 'log' -> log1p(min(barcodes, cap))
     'sqrt' -> sqrt(min(barcodes, cap))
+    'fourthroot' -> (min(barcodes, cap)) ** 0.25 -- more aggressive compression than sqrt
+    'sqrt_log' -> sqrt(log1p(min(barcodes, cap))) -- most aggressive compression of these
     'lin' -> min(barcodes, cap)
+    'none' -> uniform weight of 1 (no barcode-count weighting)
     """
     if scheme == "none": #you can remove weighting of scheme
         return np.ones(len(barcodes), dtype=np.float32)
@@ -41,6 +46,10 @@ def _compute_barcode_weights(barcodes: np.ndarray, scheme: str ="log", cap: floa
         w = np.log1p(b) #log(1 + b), compresses large values more
     elif scheme == "sqrt":
         w = np.sqrt(b) #square root transformation
+    elif scheme == "fourthroot": # x^0.25 - more drastic
+        w = np.power(b, 1/4)
+    elif scheme == "sqrt_log":   # sqrt(log(1+x)) - most drastic of these options
+        w = np.sqrt(np.log1p(b))
     elif scheme == "lin":
         w = b #just used capped values
     else:
@@ -65,14 +74,59 @@ def _compute_barcode_weights(barcodes: np.ndarray, scheme: str ="log", cap: floa
 #     plt.savefig(f'results/plots/barcodecountvsweight_{split}.png', dpi=300)
 #     plt.close()
 
-# def plot_heatmap_weights(barcode_counts, weights, split):
-#     plt.figure(figsize=(10, 8))
-#     plt.hist2d(barcode_counts, weights, bins=[50, 50], cmap='viridis', cmin=1)
-#     plt.colorbar(label='Density (count)')
-#     plt.xlabel('Barcode Count')
-#     plt.ylabel('Weight')
-#     plt.title(f'2D Density {split}: Barcode Count vs Weight')
-#     plt.savefig(f'results/plots/barcodeweight_{split}heatmap.png', dpi=300)
+def plot_heatmap_weights(barcode_counts, weights, split, ax=None, output_path=None):
+    """2D histogram of barcode count vs. the weight it maps to under one scheme.
+
+    Since weight is a deterministic function of barcode count, this traces out that
+    function's shape, with density showing how many fragments land at each point (i.e.
+    how the barcode-count distribution piles up along the compression curve).
+
+    Pass ax to draw into an existing subplot (e.g. from plot_weight_scheme_comparison);
+    otherwise a standalone figure is created and saved to output_path (if given).
+    """
+    owns_figure = ax is None
+    if owns_figure:
+        fig, ax = plt.subplots(figsize=(6, 5))
+    else:
+        fig = ax.figure
+
+    _, _, _, image = ax.hist2d(barcode_counts, weights, bins=[50, 50], cmap='viridis', cmin=1)
+    fig.colorbar(image, ax=ax, label='Density (count)')
+    ax.set_xlabel('Barcode Count')
+    ax.set_ylabel('Weight')
+    ax.set_title(f'{split}: Barcode Count vs Weight' if split else 'Barcode Count vs Weight')
+
+    if owns_figure and output_path:
+        fig.savefig(output_path, dpi=300)
+    return ax
+
+
+def plot_weight_scheme_comparison(barcode_counts, schemes=("log", "sqrt", "fourthroot", "sqrt_log", "lin"),
+                                   cap=20.0, split="", output_path=None):
+    """Grid of plot_heatmap_weights panels, one per weight_scheme, all sharing the same
+    barcode_counts input -- lets you compare how aggressively each scheme compresses
+    high-barcode-count fragments relative to low-count ones side by side.
+    """
+    barcode_counts = np.asarray(barcode_counts, dtype=float)
+    n = len(schemes)
+    ncols = min(3, n)
+    nrows = -(-n // ncols)  # ceil division
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6 * ncols, 5 * nrows), squeeze=False)
+    axes = axes.flatten()
+
+    for ax, scheme in zip(axes, schemes):
+        weights = _compute_barcode_weights(barcode_counts, scheme=scheme, cap=cap)
+        plot_heatmap_weights(barcode_counts, weights, f"{split} ({scheme})".strip(), ax=ax)
+
+    for ax in axes[n:]:
+        ax.axis("off")
+
+    fig.suptitle(f"Barcode-Weight Schemes Compared (cap={cap})", fontsize=14)
+    fig.tight_layout()
+    if output_path:
+        fig.savefig(output_path, dpi=300)
+    return fig
 
 # def plot_kde_weights(barcode_counts, weights, split):
 #     plt.figure(figsize=(10, 8))
@@ -103,23 +157,26 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             test_chroms: list[str] | None = None,
             
             use_adapters: bool = True,
-            left_adapter: str = TOMATO_ADAPTER_UP,
-            right_adapter: str = TOMATO_ADAPTER_DOWN,
-            sequence_length: int = 160, #or should this be the value with adapter length
+            left_adapter: str = JORES_ADAPTER_UP,
+            right_adapter: str = JORES_ADAPTER_DOWN,
+            sequence_length: int = 170, 
 
             reverse_complement: bool = False, #for the training set we do want this
             rc_prob: float = 0.5, #probability of applying reverse complement augmentation
             random_shift: bool = False, #shift sequence positions
             shift_prob: float = 0.5, #prob applying random shift augmentation
-            max_shift: int = 20, #min length of the adapter
+            max_shift: int = 15, #min length of the adapter
             subset_frac: float = 1.0, #for debugging, uses only fraction of data
             seed: int = 42,
             barcode_min: int = 10,       # threshold for train split
             barcode_min_eval: int = 10,  # quality-control threshold for val/test splits
             weight_scheme = "log", #for weighted loss based on barcode
+            num_outputs: int = 5,  
     ) -> None: #catch errors that may arise from inputs
         if split not in (*self.DEFAULT_FOLD_SPLITS, "all"):
             raise ValueError(f"Unknown split: {split!r}")
+        if num_outputs not in (2, 4):
+            raise ValueError(f"PlantMPRADataset only supports num_outputs of 2 or 4, got {num_outputs}")
         if sequence_length is not None and sequence_length <= 0:
             raise ValueError("sequence_length must be > 0")
         if not 0 < subset_frac <= 1:
@@ -172,8 +229,21 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         self._chroms = [row["Chr"].removeprefix(self.CHROM_PREFIX) for row in rows] #all built from same rows list
 
         #input_tsv can either be the raw 4-condition table (Leaf, MG, Br, RR) or an
-        #already-imputed table with a Fruit column (see data_prep.py:write_imputed_activity_tsv)
-        if rows and "Fruit" in rows[0]:
+        #already-imputed table with a Fruit column (see data_prep.py:write_imputed_activity_tsv).
+        #num_outputs picks which target shape to build -- it should match head.num_outputs
+        #so the model's prediction shape and the dataset's target shape always agree.
+        if num_outputs == 4:
+            missing = [col for col in ("MG", "Br", "RR") if rows and col not in rows[0]]
+            if missing:
+                raise ValueError(
+                    f"num_outputs=4 requires MG/Br/RR columns in {self.input_tsv}; missing: {missing}"
+                )
+            self._targets = np.asarray(
+                [[_to_float(row["Leaf"]), _to_float(row["MG"]), _to_float(row["Br"]), _to_float(row["RR"])]
+                 for row in rows],
+                dtype=np.float32,
+            )  # shape (N, 4): [Leaf, MG, Br, RR]
+        elif rows and "Fruit" in rows[0]:
             self._targets = np.asarray(
                 [[_to_float(row["Leaf"]), _to_float(row["Fruit"])] for row in rows],
                 dtype=np.float32,
@@ -237,7 +307,7 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         construct = f"{self.left_adapter}{self._payloads[index]}{self.right_adapter}" #adds the adapters
         onehot = sequence_to_onehot(construct).astype(np.float32, copy=False)
         onehot = self._augment(onehot) 
-        target = self._targets[index]  # shape (4,): [Leaf, MG, Br, RR] or shape (2,): [Leaf, Fruit] depending on file loaded in from
+        target = self._targets[index]  # shape (4,): [Leaf, MG, Br, RR] or shape (2,): [Leaf, Fruit], per num_outputs
         #leaf_fruit = np.array([target[0], target[1:4].mean()], dtype=np.float32)  # shape (2,): [Leaf, mean(MG,Br,RR)]
 
 
@@ -330,8 +400,78 @@ class DengMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
         weight = self._weights[index]
         return torch.from_numpy(onehot), torch.from_numpy(target), torch.tensor(weight)
 
+class JoresMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
+    """PyTorch Dataset for Jores et al. 2026's pre-split dataset. Returns two tensors
+    """
 
-def _read_deng_tsv(path: str | Path) -> list[dict[str, str]]:
+    def __init__(
+            self,
+            rows: list[dict[str, str]], #already-read rows, e.g. from csv.DictReader
+            use_adapters: bool = True,
+            left_adapter: str = JORES_ADAPTER_UP,
+            right_adapter: str = JORES_ADAPTER_DOWN,
+            sequence_length: int | None = 170,
+
+            reverse_complement: bool = False,
+            rc_prob: float = 0.5,
+            random_shift: bool = False,
+            shift_prob: float = 0.5,
+            max_shift: int = 15,
+            seed: int = 42,
+    ) -> None:
+        if sequence_length is not None and sequence_length <= 0:
+            raise ValueError("sequence_length must be > 0")
+        if not 0 <= rc_prob <= 1:
+            raise ValueError("rc_prob must be in [0, 1]")
+        if not 0 <= shift_prob <= 1:
+            raise ValueError("shift_prob must be in [0, 1]")
+        if max_shift < 0:
+            raise ValueError("max_shift must be >= 0")
+
+        self.use_adapters = bool(use_adapters)
+        self.left_adapter = left_adapter if self.use_adapters else ""
+        self.right_adapter = right_adapter if self.use_adapters else ""
+        self.sequence_length = sequence_length
+        self.reverse_complement = reverse_complement
+        self.rc_prob = rc_prob
+        self.random_shift = random_shift
+        self.shift_prob = shift_prob
+        self.max_shift = max_shift
+        self._rng = np.random.default_rng(seed)
+
+        self._payloads = [str(row["sequence"]) for row in rows]
+        self._targets = np.asarray(
+            [[_to_float(row["enrichment_cold"]), _to_float(row["enrichment_dark"]), _to_float(row["enrichment_light"]),
+              _to_float(row["enrichment_warm"]), _to_float(row["enrichment_maize"])] for row in rows],
+            dtype=np.float32,
+        )  # shape (N, 5): [cold, dark, light, warm, maize]
+
+        nan_rows = np.isnan(self._targets).any(axis=1)
+        if nan_rows.any():
+            raise ValueError(f"{int(nan_rows.sum())} rows have NaN gene expression activity")
+
+
+    def __len__(self) -> int:
+        return len(self._payloads)
+
+    def _augment(self, onehot: np.ndarray) -> np.ndarray:
+        out = onehot
+        if self.reverse_complement and self._rng.random() < self.rc_prob: #decide to reverse complement
+            out = _reverse_complement_onehot(out)
+        if self.random_shift and self.max_shift > 0 and self._rng.random() < self.shift_prob: #random shift augmentation
+            shift = int(self._rng.integers(-self.max_shift, self.max_shift + 1)) #pick a shift based on max val
+            out = np.roll(out, shift, axis=0) #shifts elements in array by specified shift
+        return out
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        construct = f"{self.left_adapter}{self._payloads[index]}{self.right_adapter}" #adds the adapters
+        onehot = sequence_to_onehot(construct).astype(np.float32, copy=False)
+        onehot = self._augment(onehot)
+        target = self._targets[index]  # shape (5,): [cold, dark, light, warm, maize]
+        return torch.from_numpy(onehot), torch.from_numpy(target)
+
+
+def _read_custom_tsv(path: str | Path) -> list[dict[str, str]]:
     with open(path, newline="") as handle:
         return list(csv.DictReader(handle, delimiter="\t"))
 
@@ -353,8 +493,8 @@ def create_deng_splits(
     if not 0 < val_frac < 1:
         raise ValueError("val_frac must be in (0, 1)")
 
-    train_rows = _read_deng_tsv(train_txt)
-    test_rows = _read_deng_tsv(test_txt)
+    train_rows = _read_custom_tsv(train_txt)
+    test_rows = _read_custom_tsv(test_txt)
 
     n_val = int(round((len(train_rows) + len(test_rows)) * val_frac))
     if n_val >= len(train_rows):
@@ -376,6 +516,33 @@ def create_deng_splits(
     train_dataset = Subset(full_aug, indices[n_val:])
 
     return train_dataset, val_dataset, test_dataset
+
+def create_jores_splits(
+    input_tsv: str | Path,
+    seed: int = 42,
+    **dataset_kwargs,
+    ) -> tuple[JoresMPRADataset, JoresMPRADataset, JoresMPRADataset]:
+    """Build train/val/test splits from modelling_data_tamsACR.tsv's own 'set' column.
+
+    Split is already fixed per-row in the source file, so this just partitions rows by that column.
+    Augmentation is applied only to the train split.
+    """
+    all_rows = _read_custom_tsv(input_tsv)
+    rows_by_split: dict[str, list[dict[str, str]]] = {"train": [], "val": [], "test": []} #set up bins
+    for row in all_rows:
+        split_name = row["set"]
+        if split_name not in rows_by_split:
+            raise ValueError(f"Unexpected 'set' value {split_name!r} in {input_tsv}")
+        rows_by_split[split_name].append(row)
+    
+    noaug_kwargs = {**dataset_kwargs, "reverse_complement": False, "random_shift": False}
+
+    train_dataset = JoresMPRADataset(rows_by_split["train"], seed=seed, **dataset_kwargs)
+    val_dataset = JoresMPRADataset(rows_by_split["val"], seed=seed, **noaug_kwargs) #only augment the training set
+    test_dataset = JoresMPRADataset(rows_by_split["test"], seed=seed, **noaug_kwargs)
+
+    return train_dataset, val_dataset, test_dataset
+
 
 
 def create_random_splits(

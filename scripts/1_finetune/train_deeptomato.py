@@ -50,7 +50,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reverse_complement", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--random_shift", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--weight_scheme", type=str, default=None, choices=["log", "sqrt", "lin"])
+    parser.add_argument("--weight_scheme", type=str, default=None, choices=["log", "sqrt", "fourthroot", "sqrt_log", "lin"])
 
     parser.add_argument("--pooling_type", type=str, default=None, choices=["flatten", "center", "mean", "sum", "max"])
     parser.add_argument("--center_bp", type=int, default=None)

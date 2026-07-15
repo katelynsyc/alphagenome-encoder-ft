@@ -50,7 +50,6 @@ class DataConfig:
     sequence_length: int | None = None
     barcode_min: int = 10
     barcode_min_eval: int = 10
-    #construct_mode: str = "promoter_barcode"
     batch_size: int = 32
     reverse_complement: bool = False
     rc_prob: float = 0.5
@@ -67,7 +66,7 @@ class DataConfig:
     val_chroms: list[str] | None = None
     test_chroms: list[str] | None = None
     weight_scheme: str | None = "log"
-    split_mode: str = "chrom"  # "chrom", "random", or "deng"
+    split_mode: str = "chrom"  # "chrom", "random", "deng" or "jores"
     train_frac: float = 0.8
     val_frac: float = 0.1
 
@@ -78,10 +77,6 @@ class DataConfig:
             raise ValueError("data.barcode_min must be >= 1")
         if self.barcode_min_eval < 1:
             raise ValueError("data.barcode_min_eval must be >= 1")
-        # if self.construct_mode not in {"none", "adapters", "promoter", "promoter_barcode", "all"}:
-        #     raise ValueError(
-        #         "data.construct_mode must be one of none, adapters, promoter, promoter_barcode, all"
-        #     )
         if not 0 < self.subset_frac <= 1:
             raise ValueError("data.subset_frac must be in (0, 1]")
         if not 0 <= self.rc_prob <= 1:
@@ -94,8 +89,8 @@ class DataConfig:
             raise ValueError("data.batch_size must be > 0")
         if self.num_workers < 0:
             raise ValueError("data.num_workers must be >= 0")
-        if self.split_mode not in {"chrom", "random", "deng"}:
-            raise ValueError("data.split_mode must be 'chrom', 'random', or 'deng'")
+        if self.split_mode not in {"chrom", "random", "deng", "jores"}:
+            raise ValueError("data.split_mode must be 'chrom', 'random', 'deng' or 'jores'")
         if not 0 < self.train_frac < 1:
             raise ValueError("data.train_frac must be in (0, 1)")
         if not 0 < self.val_frac < 1:

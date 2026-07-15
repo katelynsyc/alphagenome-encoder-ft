@@ -61,7 +61,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--val_chroms", type=str, nargs="+", default=None)
     parser.add_argument("--test_chroms", type=str, nargs="+", default=None)
-    parser.add_argument("--weight_scheme", type=str, default=None, choices=["log", "sqrt", "lin", "none"])
+    parser.add_argument("--weight_scheme", type=str, default=None, choices=["log", "sqrt", "fourthroot", "sqrt_log", "lin", "none"])
     parser.add_argument("--split_mode", type=str, default=None, choices=["chrom", "random", "deng"])
     parser.add_argument("--train_frac", type=float, default=None)
     parser.add_argument("--val_frac", type=float, default=None)

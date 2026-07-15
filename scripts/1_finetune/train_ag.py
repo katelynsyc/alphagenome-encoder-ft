@@ -17,6 +17,7 @@ from alphagenome_encoder_ft import (
     add_metrics_to_history,
     create_dataloader,
     create_deng_splits,
+    create_jores_splits,
     create_optimizer,
     create_random_splits,
     create_scheduler,
@@ -57,8 +58,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--val_chroms", type=str, nargs="+", default=None)
     parser.add_argument("--test_chroms", type=str, nargs="+", default=None)
-    parser.add_argument("--weight_scheme", type=str, default=None, choices=["log", "sqrt", "lin", "none"])
-    parser.add_argument("--split_mode", type=str, default=None, choices=["chrom", "random", "deng"])
+    parser.add_argument("--weight_scheme", type=str, default=None, choices=["log", "sqrt", "fourthroot", "sqrt_log", "lin", "none"])
+    parser.add_argument("--split_mode", type=str, default=None, choices=["chrom", "random", "deng", "jores"])
     parser.add_argument("--train_frac", type=float, default=None)
     parser.add_argument("--val_frac", type=float, default=None)
 
@@ -208,7 +209,23 @@ def _make_dataset(config: TrainConfig, split: str) -> PlantMPRADataset:
         val_chroms=config.data.val_chroms,
         test_chroms=config.data.test_chroms,
         weight_scheme=config.data.weight_scheme,
+        num_outputs=config.head.num_outputs,
     )
+
+
+def _track_names_for(config: TrainConfig) -> list[str] | None:
+    """Per-output condition names for per-track pearson, keyed by dataset/split_mode.
+
+    Order must match each dataset's target tensor layout exactly. Returns None (falls
+    back to a generic "pearson_trackN" naming in train.py) for anything not listed here.
+    """
+    if config.data.split_mode == "jores":
+        return ["cold", "dark", "light", "warm", "maize"]  # matches JoresMPRADataset._targets order
+    if config.head.num_outputs == 4:
+        return ["leaf", "MG", "Br", "RR"]  # matches PlantMPRADataset's 4-output target order
+    if config.head.num_outputs == 2:
+        return ["leaf", "fruit"]  # matches PlantMPRADataset/DengMPRADataset's 2-output target order
+    return None
 
 
 def _make_datasets(config: TrainConfig) -> tuple[Any, Any, Any]:
@@ -228,11 +245,19 @@ def _make_datasets(config: TrainConfig) -> tuple[Any, Any, Any]:
             shift_prob=config.data.shift_prob,
             max_shift=config.data.max_shift,
             subset_frac=config.data.subset_frac,
+            num_outputs=config.head.num_outputs,
         )
         print(f"Random split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
         return train_dataset, val_dataset, test_dataset
 
     if config.data.split_mode == "deng":
+        # DengMPRADataset (train.txt/test.txt) only ever has Leaf_activity/Fruit_activity --
+        # there's no MG/Br/RR breakdown in that file format, so 4-output targets aren't possible here.
+        if config.head.num_outputs == 4:
+            raise ValueError(
+                "split_mode='deng' only provides Leaf/Fruit targets; set head.num_outputs=2 "
+                "or use split_mode='chrom'/'random' with a 4-column (Leaf/MG/Br/RR) input_tsv"
+            )
         train_dataset, val_dataset, test_dataset = create_deng_splits(
             config.data.train_txt, #use the explicitly passed in splits
             config.data.test_txt,
@@ -246,6 +271,20 @@ def _make_datasets(config: TrainConfig) -> tuple[Any, Any, Any]:
             max_shift=config.data.max_shift,
         )
         print(f"Deng split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
+        return train_dataset, val_dataset, test_dataset
+    
+    if config.data.split_mode == "jores":
+        train_dataset, val_dataset, test_dataset = create_jores_splits(
+            config.data.input_tsv,
+            seed=config.runtime.seed,
+            sequence_length=config.data.sequence_length,
+            reverse_complement=config.data.reverse_complement,
+            rc_prob=config.data.rc_prob,
+            random_shift=config.data.random_shift,
+            shift_prob=config.data.shift_prob,
+            max_shift=config.data.max_shift,
+        )
+        print(f"Jores split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
         return train_dataset, val_dataset, test_dataset
 
     train_dataset = _make_dataset(config, "train")
@@ -301,6 +340,7 @@ def main() -> dict[str, Any]:
     print(model.head)
 
     train_dataset, val_dataset, test_dataset = _make_datasets(config)
+    track_names = _track_names_for(config)
 
     train_loader = create_dataloader(
         train_dataset,
@@ -388,6 +428,7 @@ def main() -> dict[str, Any]:
             stage2_scheduler_factory=stage2_scheduler_factory,
             stage1_scheduler_step=stage1_scheduler_step,
             stage2_scheduler_step=scheduler_stepper(config.optim.lr_scheduler),
+            track_names=track_names,
             epoch_callback=wandb_epoch_logger,
             show_progress=args.show_progress,
         )
@@ -404,6 +445,7 @@ def main() -> dict[str, Any]:
             val_loader=val_loader,
             scheduler=stage1_scheduler,
             scheduler_step=stage1_scheduler_step,
+            track_names=track_names,
             checkpoint_dir=run_dir / "stage1",
             epoch_callback=wandb_epoch_logger,
             show_progress=args.show_progress,
@@ -420,7 +462,7 @@ def main() -> dict[str, Any]:
         checkpoint_path = stage_result.get("best_checkpoint_path")
         test_epoch = float(stage_result.get("best_epoch", 0))
         load_checkpoint(checkpoint_path, model, map_location=device)
-        test_metrics = evaluate(model, test_loader, device, use_amp=config.runtime.use_amp)
+        test_metrics = evaluate(model, test_loader, device, track_names=track_names, use_amp=config.runtime.use_amp)
         results[f"{stage_name}_test_metrics"] = test_metrics
         test_metric_parts = [f"test_{key}={value:.4f}" for key, value in sorted(test_metrics.items())]
         print(f"[{stage_name}] final test | epoch {test_epoch:g} | " + " | ".join(test_metric_parts))

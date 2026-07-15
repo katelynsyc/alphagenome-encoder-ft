@@ -225,11 +225,7 @@ pyrightconfig.json
 
 #results & plots folder want to ignore when pushing
 results/
-metadata/Supplementary Data Set 1.xlsx
-metadata/Supplementary Full Dataset 2.xlsx
-metadata/log2_pseudocounted.xlsx
-metadata/Supplementary Dataset 2-ReadCount-RPM-ratio-log2ratio.xlsx
-
+metadata/
 
 # wandb run artifacts (already synced to W&B cloud)
 wandb/

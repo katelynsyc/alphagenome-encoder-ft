@@ -1,0 +1,66 @@
+{
+  "_comment": "Hyperparameters transferred from optimal_WTC11.json, reformatted to match the tomatompra.json config schema, but this is for Jores dataset.",
+  "data": {
+    "input_tsv": null,
+    "sequence_length": 170,
+    "batch_size": 128,
+    "barcode_min": 1,
+    "barcode_min_eval": 1,
+    "reverse_complement": false,
+    "rc_prob": 0.5,
+    "random_shift": false,
+    "shift_prob": 0.5,
+    "max_shift": 15,
+    "subset_frac": 1.0,
+    "num_workers": 0,
+    "pin_memory": false,
+    "val_chroms": [],
+    "test_chroms": [],
+    "weight_scheme": "none",
+    "split_mode": "jores",
+    "train_frac": 0.8,
+    "val_frac": 0.1
+  },
+  "head": {
+    "head_type": "deepstarr",
+    "num_outputs": 5,
+    "center_bp": 256,
+    "pooling_type": "flatten",
+    "hidden_sizes": [1024],
+    "dropout": 0.3,
+    "activation": "relu"
+  },
+  "optim": {
+    "optimizer": "adam",
+    "learning_rate": 5e-5,
+    "weight_decay": 1e-6,
+    "lr_scheduler": "constant",
+    "gradient_accumulation_steps": 1,
+    "gradient_clip": null
+  },
+  "stage": {
+    "num_epochs": 30,
+    "early_stopping_patience": 5,
+    "val_evals_per_epoch": 1,
+    "second_stage_lr": null,
+    "second_stage_epochs": 50
+  },
+  "cached_embeddings": {
+    "use_cached_embeddings": false,
+    "cache_file": null
+  },
+  "checkpoint": {
+    "pretrained_weights": null,
+    "checkpoint_dir": "./results/models/checkpoints/"
+  },
+  "logging": {
+    "use_wandb": true,
+    "wandb_project": "alphagenome-jores",
+    "wandb_name": "ag-jores"
+  },
+  "runtime": {
+    "device": null,
+    "use_amp": false,
+    "seed": 42
+  }
+}

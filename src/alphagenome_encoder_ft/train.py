@@ -83,6 +83,7 @@ def _compute_metrics(
     preds: Tensor,
     targets: Tensor,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None,
+    track_names: list[str] | None = None,
 ) -> dict[str, float]:
     functions = metric_fns or {"pearson": _pearson_r}
     metrics: dict[str, float] = {}
@@ -92,23 +93,22 @@ def _compute_metrics(
             value = value.detach().float().cpu().item()
         metrics[name] = float(value)
 
-    # multi-output heads (e.g. DeepSTARR dev+hk): also report per-track pearson.
-    per_track = _pearson_r_per_track(preds, targets) #his has the list of the pearson r's
-    if len(per_track) == 4: #four predictions
-        metrics["leaf_pearson"] = per_track[0]
-        metrics["MG_pearson"] = per_track[1]
-        metrics["Br_pearson"] = per_track[2]
-        metrics["RR_pearson"] = per_track[3]
-    elif len(per_track) == 2:
-        metrics["leaf_pearson"] = per_track[0]
-        metrics["fruit_pearson"] = per_track[1]
-    else:
-        for idx, score in enumerate(per_track):
-            metrics[f"pearson_track{idx}"] = score
+    # multi-output heads (e.g. DeepSTARR dev+hk, Jores light/dark/warm/cold/maize):
+    # also report per-track pearson, keyed by the caller's track_names when given
+    # (the caller knows which dataset/condition set is in play; this stays dataset-
+    # agnostic) or a generic "pearson_trackN" fallback otherwise.
+    per_track = _pearson_r_per_track(preds, targets)
+    if per_track:
+        if track_names is not None and len(track_names) == len(per_track):
+            for name, score in zip(track_names, per_track):
+                metrics[f"{name}_pearson"] = score
+        else:
+            for idx, score in enumerate(per_track):
+                metrics[f"pearson_track{idx}"] = score
 
-    # mean of the per-condition pearsons -- matches train_deeptomato.py's mean_pearson
-    # (mean of independently-computed per-tissue Pearson correlations)
-    if per_track and "pearson" in metrics:
+        # mean of the per-condition pearsons -- matches train_deeptomato.py's mean_pearson
+        # (mean of independently-computed per-tissue Pearson correlations), used in place
+        # of the pooled/flattened correlation since it's inflated by between-track separation.
         metrics["pearson"] = sum(per_track) / len(per_track)
     return metrics
 
@@ -177,6 +177,7 @@ def train_epoch(
     *,
     loss_fn: Callable[[Tensor, Tensor], Tensor] | None = None,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None = None,
+    track_names: list[str] | None = None,
     gradient_accumulation_steps: int = 1,
     use_amp: bool = True,
     train_encoder: bool = False,
@@ -257,7 +258,7 @@ def train_epoch(
             break
 
     preds_cat, targets_cat = _gather_predictions(all_preds, all_targets)
-    metrics = _compute_metrics(preds_cat, targets_cat, metric_fns)
+    metrics = _compute_metrics(preds_cat, targets_cat, metric_fns, track_names=track_names)
     metrics["loss"] = total_loss / max(1, total_samples)
     return metrics
 
@@ -270,6 +271,7 @@ def evaluate(
     *,
     loss_fn: Callable[[Tensor, Tensor], Tensor] | None = None,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None = None,
+    track_names: list[str] | None = None,
     use_amp: bool = True,
 ) -> dict[str, float]:
     """Evaluate on a data loader."""
@@ -299,7 +301,7 @@ def evaluate(
         all_targets.append(targets.detach().float().cpu())
 
     preds_cat, targets_cat = _gather_predictions(all_preds, all_targets)
-    metrics = _compute_metrics(preds_cat, targets_cat, metric_fns)
+    metrics = _compute_metrics(preds_cat, targets_cat, metric_fns, track_names=track_names)
     metrics["loss"] = total_loss / max(1, total_samples)
     return metrics
 
@@ -431,6 +433,7 @@ def run_training_stage(
     scheduler_step: Callable[[Any, dict[str, float]], None] | None = None,
     loss_fn: Callable[[Tensor, Tensor], Tensor] | None = None,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None = None,
+    track_names: list[str] | None = None,
     checkpoint_dir: str | Path | None = None,
     start_epoch: int = 0,
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
@@ -483,6 +486,7 @@ def run_training_stage(
                 device,
                 loss_fn=loss_fn,
                 metric_fns=metric_fns,
+                track_names=track_names,
                 use_amp=config.runtime.use_amp,
             )
             # ``evaluate`` switches the module to eval mode; restore the active
@@ -529,6 +533,7 @@ def run_training_stage(
             device,
             loss_fn=loss_fn,
             metric_fns=metric_fns,
+            track_names=track_names,
             gradient_accumulation_steps=config.optim.gradient_accumulation_steps,
             use_amp=config.runtime.use_amp,
             train_encoder=train_encoder,
@@ -601,6 +606,7 @@ def run_two_stage_training(
     stage2_scheduler_step: Callable[[Any, dict[str, float]], None] | None = None,
     loss_fn: Callable[[Tensor, Tensor], Tensor] | None = None,
     metric_fns: dict[str, Callable[[Tensor, Tensor], Tensor | float]] | None = None,
+    track_names: list[str] | None = None,
     epoch_callback: Callable[[dict[str, Any]], None] | None = None,
     show_progress: bool = False,
 ) -> dict[str, Any]:
@@ -637,6 +643,7 @@ def run_two_stage_training(
             scheduler_step=stage1_scheduler_step,
             loss_fn=loss_fn,
             metric_fns=metric_fns,
+            track_names=track_names,
             checkpoint_dir=stage1_dir,
             epoch_callback=epoch_callback,
             show_progress=show_progress,
@@ -674,6 +681,7 @@ def run_two_stage_training(
         scheduler_step=stage2_scheduler_step,
         loss_fn=loss_fn,
         metric_fns=metric_fns,
+        track_names=track_names,
         checkpoint_dir=stage2_dir,
         start_epoch=stage1_result["best_epoch"],
         epoch_callback=epoch_callback,

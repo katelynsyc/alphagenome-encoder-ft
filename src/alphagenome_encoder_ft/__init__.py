@@ -18,6 +18,8 @@ __all__ = [
     "create_random_splits",
     "DengMPRADataset",
     "create_deng_splits",
+    "JoresMPRADataset",
+    "create_jores_splits",
     "LentiMPRADataset",
     "DeepSTARRDataset",
     "DEEPSTARR_ADAPTER_UP",
@@ -51,6 +53,8 @@ def __getattr__(name: str):
                  "create_random_splits",
                 "DengMPRADataset",
                  "create_deng_splits",
+                "JoresMPRADataset",
+                "create_jores_splits",
                 "create_dataloader"}:
         from . import mydata
 
