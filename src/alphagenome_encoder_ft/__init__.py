@@ -31,9 +31,8 @@ __all__ = [
     "LENTIMPRA_PROMOTER",
     "LENTIMPRA_RIGHT_ADAPTER",
     "AlphaGenomeEncoderModel",
-    "EncoderMPRAModel",
     "MPRAHead",
-    "DeepSTARRHead",
+    "JoresMPRAHead",
     "train_epoch",
     "evaluate",
     "run_training_stage",
@@ -45,6 +44,8 @@ __all__ = [
     "create_scheduler",
     "scheduler_stepper",
     "add_metrics_to_history",
+    "stable_run_id",
+    "training_run_id",
 ]
 
 
@@ -96,11 +97,11 @@ def __getattr__(name: str):
         from . import config
 
         return getattr(config, name)
-    if name in {"AlphaGenomeEncoderModel", "EncoderMPRAModel"}:
+    if name in {"AlphaGenomeEncoderModel"}:
         from . import model
 
         return getattr(model, name)
-    if name in {"MPRAHead", "DeepSTARRHead"}:
+    if name in {"MPRAHead", "JoresMPRAHead"}:
         from . import heads
 
         return getattr(heads, name)
@@ -116,6 +117,8 @@ def __getattr__(name: str):
         "create_scheduler",
         "scheduler_stepper",
         "add_metrics_to_history",
+        "stable_run_id",
+        "training_run_id",
     }:
         from . import train
 

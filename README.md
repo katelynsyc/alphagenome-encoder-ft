@@ -11,9 +11,9 @@ Note: The current codebase does not yet include the full feature surface of `alp
 | `head_type` | Class | Outputs | Default use |
 |-------------|-------|---------|-------------|
 | `mpra` (default) | `MPRAHead` | 1 scalar per sequence | LentiMPRA-style scalar regression |
-| `deepstarr` | `DeepSTARRHead` | 2 scalars per sequence (dev, hk) | Drosophila STARR-seq dual-output regression |
+| `joresmpra` | `JoresMPRAHead` | 5 scalars per sequence | Jores et al. 2026 plant MPRA dataset (light/dark/warm/cold/maize) |
 
-Both heads share the same pooling modes (`flatten`, `center`, `mean`, `sum`, `max`) and the same `LayerNorm → MLP → Linear` layout; `DeepSTARRHead` is a subclass of `MPRAHead` whose only functional difference is `num_outputs=2`.
+Both heads share the same pooling modes (`flatten`, `center`, `mean`, `sum`, `max`) and the same `LayerNorm → MLP → Linear` layout; `JoresMPRAHead` is a subclass of `MPRAHead` whose only functional difference is `num_outputs=5`.
 
 Checkpoints persist a top-level `head_type` field so `AlphaGenomeEncoderModel.from_checkpoint(...)` can dispatch to the right class. Checkpoints written before this field existed (no `head_type` key) default to `"mpra"` for backward compatibility.
 
@@ -50,7 +50,7 @@ alphagenome-encoder-ft/
 │   ├── config.py     # default configs for each cell type
 │   ├── constructs.py # ConstructSpec assembly rules
 │   ├── data.py       # lentiMPRA + DeepSTARR datasets and dataloader helpers
-│   ├── heads.py      # MPRAHead, DeepSTARRHead
+│   ├── heads.py      # MPRAHead, JoresMPRAHead
 │   ├── model.py      # AlphaGenomeEncoderModel wrapper (AG Encoder + MPRAHead)
 │   └── train.py      # reusable encoder-only training utilities
 ├── configs/

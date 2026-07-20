@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
@@ -29,8 +30,9 @@ from alphagenome_encoder_ft import (
     run_training_stage,
     run_two_stage_training,
     scheduler_stepper,
+    stable_run_id,
+    training_run_id,
 )
-
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -55,6 +57,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shift_prob", type=float, default=None)
     parser.add_argument("--reverse_complement", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--random_shift", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--reseed_per_epoch", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--val_chroms", type=str, nargs="+", default=None)
     parser.add_argument("--test_chroms", type=str, nargs="+", default=None)
@@ -68,7 +71,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden_sizes", type=str, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--activation", type=str, default=None, choices=["relu", "gelu"])
-    parser.add_argument("--head_type", type=str, default=None, choices=["mpra", "deepstarr", "deeptomato"])
+    parser.add_argument("--head_type", type=str, default=None, choices=["mpra", "joresmpra", "deeptomato"])
     parser.add_argument("--num_outputs", type=int, default=None)
 
     parser.add_argument("--optimizer", type=str, default=None, choices=["adam", "adamw"])
@@ -87,7 +90,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--val_evals_per_epoch", type=int, default=None)
     parser.add_argument("--second_stage_lr", type=float, default=None)
     parser.add_argument("--second_stage_epochs", type=int, default=None)
+    parser.add_argument("--second_stage_lr_scheduler", type=str, default=None, choices=["constant", "cosine", "plateau"])
+    parser.add_argument("--second_stage_dropout", type=float, default=None)
     parser.add_argument("--resume_from_stage2", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--auto_resume", action=argparse.BooleanOptionalAction, default=None)
 
     parser.add_argument("--use_wandb", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--wandb_project", type=str, default=None)
@@ -120,6 +126,7 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "reverse_complement": args.reverse_complement,
         "rc_prob": args.rc_prob,
         "random_shift": args.random_shift,
+        "reseed_per_epoch": args.reseed_per_epoch,
         "shift_prob": args.shift_prob,
         "max_shift": args.max_shift,
         "subset_frac": args.subset_frac,
@@ -159,7 +166,10 @@ def _build_overrides(args: argparse.Namespace) -> dict[str, Any]:
         "val_evals_per_epoch": args.val_evals_per_epoch,
         "second_stage_lr": args.second_stage_lr,
         "second_stage_epochs": args.second_stage_epochs,
+        "second_stage_lr_scheduler": args.second_stage_lr_scheduler,
+        "second_stage_dropout": args.second_stage_dropout,
         "resume_from_stage2": args.resume_from_stage2,
+        "auto_resume": args.auto_resume,
     }
     checkpoint_pairs = {
         "pretrained_weights": args.pretrained_weights,
@@ -206,6 +216,7 @@ def _make_dataset(config: TrainConfig, split: str) -> PlantMPRADataset:
         max_shift=config.data.max_shift,
         subset_frac=config.data.subset_frac,
         seed=config.runtime.seed,
+        reseed_per_epoch=config.data.reseed_per_epoch,
         val_chroms=config.data.val_chroms,
         test_chroms=config.data.test_chroms,
         weight_scheme=config.data.weight_scheme,
@@ -246,6 +257,7 @@ def _make_datasets(config: TrainConfig) -> tuple[Any, Any, Any]:
             max_shift=config.data.max_shift,
             subset_frac=config.data.subset_frac,
             num_outputs=config.head.num_outputs,
+            reseed_per_epoch=config.data.reseed_per_epoch,
         )
         print(f"Random split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
         return train_dataset, val_dataset, test_dataset
@@ -269,6 +281,7 @@ def _make_datasets(config: TrainConfig) -> tuple[Any, Any, Any]:
             random_shift=config.data.random_shift,
             shift_prob=config.data.shift_prob,
             max_shift=config.data.max_shift,
+            reseed_per_epoch=config.data.reseed_per_epoch,
         )
         print(f"Deng split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
         return train_dataset, val_dataset, test_dataset
@@ -283,6 +296,7 @@ def _make_datasets(config: TrainConfig) -> tuple[Any, Any, Any]:
             random_shift=config.data.random_shift,
             shift_prob=config.data.shift_prob,
             max_shift=config.data.max_shift,
+            reseed_per_epoch=config.data.reseed_per_epoch,
         )
         print(f"Jores split: {len(train_dataset)} train / {len(val_dataset)} val / {len(test_dataset)} test")
         return train_dataset, val_dataset, test_dataset
@@ -308,11 +322,38 @@ def main() -> dict[str, Any]:
     except ValueError as exc:
         parser.error(str(exc))
 
+    return run(config, show_progress=args.show_progress)
+
+
+def run(
+    config: TrainConfig,
+    *,
+    show_progress: bool,
+    epoch_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Run the full training path (dataset selection, one/two-stage training, final test eval,
+    wandb hookup) for an already-built config. Factored out of main() so the Ray Tune driver
+    (train_ag_tune.py) can reuse this exact path per trial without duplicating it.
+
+    ``epoch_callback``, if given, is called alongside (not instead of) the internal wandb
+    logger with the same per-epoch metrics payload -- this is how train_ag_tune.py reports
+    metrics to Ray Tune for ASHA without duplicating this function.
+    """
+
     torch.manual_seed(config.runtime.seed)
     device = torch.device(config.runtime.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"Using device: {device}", flush=True)
+
+    # Give every distinct hyperparameterization its own checkpoint subfolder (named after a
+    # hash of the training-relevant config) instead of writing all runs into the same
+    # checkpoint_dir/stage{1,2}/{last,best}.pt -- so a genuine preemption-and-requeue of this
+    # exact job resumes normally (same config -> same folder), while an intentional parameter
+    # change starts clean in its own folder instead of overwriting or resuming onto a
+    # previous, differently-parameterized run's checkpoints. See train.training_run_id.
+    config.checkpoint.checkpoint_dir = str(Path(config.checkpoint.checkpoint_dir) / training_run_id(config))
     run_dir = Path(config.checkpoint.checkpoint_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Checkpoint dir for this run (parameter hash: {run_dir.name}): {run_dir}")
     with open(run_dir / "config.json", "w") as handle:
         json.dump(config.to_dict(), handle, indent=2)
     print(f"Saved config to {run_dir / 'config.json'}")
@@ -381,6 +422,8 @@ def main() -> dict[str, Any]:
                 project=config.logging.wandb_project,
                 name=config.logging.wandb_name,
                 config=config.to_dict(),
+                id=stable_run_id(config.checkpoint.checkpoint_dir, config),
+                resume="allow",
             )
 
             def wandb_epoch_logger(metrics: dict[str, Any]) -> None:
@@ -405,6 +448,14 @@ def main() -> dict[str, Any]:
             print("wandb is not installed; continuing without wandb")
             config.logging.use_wandb = False
 
+    def combined_epoch_logger(metrics: dict[str, Any]) -> None:
+        if wandb_epoch_logger is not None:
+            wandb_epoch_logger(metrics)
+        if epoch_callback is not None:
+            epoch_callback(metrics)
+
+    active_epoch_logger = combined_epoch_logger if (wandb_epoch_logger is not None or epoch_callback is not None) else None
+
     if config.stage.second_stage_lr is not None: #has two stages of training, the first where the encoder is frozen and just training the head, in the second stage you can train the entire thing
         def stage2_optimizer_factory(model_obj):
             return create_optimizer(
@@ -413,8 +464,13 @@ def main() -> dict[str, Any]:
                 learning_rate=config.stage.second_stage_lr,
             )
 
+        # None = inherit optim.lr_scheduler; lets stage 2 turn on decay (e.g. "plateau")
+        # without touching stage 1, while reusing optim.plateau_factor/patience/mode/min_lr.
+        stage2_lr_scheduler = config.stage.second_stage_lr_scheduler or config.optim.lr_scheduler
+
         def stage2_scheduler_factory(optimizer):
-            return create_scheduler(config.optim, optimizer, config.stage.second_stage_epochs)
+            stage2_optim = replace(config.optim, lr_scheduler=stage2_lr_scheduler)
+            return create_scheduler(stage2_optim, optimizer, config.stage.second_stage_epochs)
 
         results = run_two_stage_training(
             model,
@@ -427,10 +483,10 @@ def main() -> dict[str, Any]:
             stage1_scheduler=stage1_scheduler,
             stage2_scheduler_factory=stage2_scheduler_factory,
             stage1_scheduler_step=stage1_scheduler_step,
-            stage2_scheduler_step=scheduler_stepper(config.optim.lr_scheduler),
+            stage2_scheduler_step=scheduler_stepper(stage2_lr_scheduler),
             track_names=track_names,
-            epoch_callback=wandb_epoch_logger,
-            show_progress=args.show_progress,
+            epoch_callback=active_epoch_logger,
+            show_progress=show_progress,
         )
     else:
         results = run_training_stage(
@@ -447,8 +503,9 @@ def main() -> dict[str, Any]:
             scheduler_step=stage1_scheduler_step,
             track_names=track_names,
             checkpoint_dir=run_dir / "stage1",
-            epoch_callback=wandb_epoch_logger,
-            show_progress=args.show_progress,
+            epoch_callback=active_epoch_logger,
+            show_progress=show_progress,
+            resume=config.stage.auto_resume,
         )
 
     test_targets: list[tuple[str, dict[str, Any]]] = [("stage1", results)]
@@ -466,11 +523,11 @@ def main() -> dict[str, Any]:
         results[f"{stage_name}_test_metrics"] = test_metrics
         test_metric_parts = [f"test_{key}={value:.4f}" for key, value in sorted(test_metrics.items())]
         print(f"[{stage_name}] final test | epoch {test_epoch:g} | " + " | ".join(test_metric_parts))
-        if wandb_epoch_logger is not None:
+        if active_epoch_logger is not None:
             test_payload = {"stage": stage_name, "epoch": test_epoch, "event": "final_test"}
             for key, value in test_metrics.items():
                 test_payload[f"test_{key}"] = value
-            wandb_epoch_logger(test_payload)
+            active_epoch_logger(test_payload)
         if stage_name == final_stage:
             final_metrics = test_metrics
             final_epoch = test_epoch

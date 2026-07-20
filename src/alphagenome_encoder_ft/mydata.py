@@ -168,10 +168,11 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             max_shift: int = 15, #min length of the adapter
             subset_frac: float = 1.0, #for debugging, uses only fraction of data
             seed: int = 42,
+            reseed_per_epoch: bool = True, #see set_epoch(): reseeds augmentation RNG from (seed, epoch) each epoch so resumed runs reproduce an uninterrupted run's augmentations. Set False to restore the old single continuous RNG stream.
             barcode_min: int = 10,       # threshold for train split
             barcode_min_eval: int = 10,  # quality-control threshold for val/test splits
             weight_scheme = "log", #for weighted loss based on barcode
-            num_outputs: int = 5,  
+            num_outputs: int = 5,
     ) -> None: #catch errors that may arise from inputs
         if split not in (*self.DEFAULT_FOLD_SPLITS, "all"):
             raise ValueError(f"Unknown split: {split!r}")
@@ -199,6 +200,8 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         self.random_shift = random_shift
         self.shift_prob = shift_prob
         self.max_shift = max_shift
+        self._base_seed = seed
+        self._reseed_per_epoch = reseed_per_epoch
         self._rng = np.random.default_rng(seed)
         self.barcode_min = barcode_min if split == "train" else barcode_min_eval #can change threshold for training set
         self.barcode_min_eval = barcode_min_eval #for test and val sets, this is always the same 
@@ -293,7 +296,15 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
 
     def __len__(self) -> int:
         return len(self._payloads)
-    
+
+    def set_epoch(self, epoch: int) -> None:
+        """Reseed the augmentation RNG from (base_seed, epoch). Called once per epoch by the
+        training loop so a resumed run's augmentations exactly match an uninterrupted run's for
+        that epoch, instead of restarting the RNG stream from scratch. No-op when
+        reseed_per_epoch=False (keeps the original single continuous RNG stream set in __init__)."""
+        if self._reseed_per_epoch:
+            self._rng = np.random.default_rng(self._base_seed + epoch)
+
     def _augment(self, onehot: np.ndarray) -> np.ndarray:
         out = onehot
         if self.reverse_complement and self._rng.random() < self.rc_prob: #decide to reverse complement
@@ -302,11 +313,11 @@ class PlantMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             shift = int(self._rng.integers(-self.max_shift, self.max_shift + 1)) #pick a shift based on max val
             out = np.roll(out, shift, axis=0) #shifts elements in array by specified shift
         return out
-    
+
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]: #return one sample
         construct = f"{self.left_adapter}{self._payloads[index]}{self.right_adapter}" #adds the adapters
         onehot = sequence_to_onehot(construct).astype(np.float32, copy=False)
-        onehot = self._augment(onehot) 
+        onehot = self._augment(onehot)
         target = self._targets[index]  # shape (4,): [Leaf, MG, Br, RR] or shape (2,): [Leaf, Fruit], per num_outputs
         #leaf_fruit = np.array([target[0], target[1:4].mean()], dtype=np.float32)  # shape (2,): [Leaf, mean(MG,Br,RR)]
 
@@ -347,6 +358,7 @@ class DengMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
             shift_prob: float = 0.5,
             max_shift: int = 20,
             seed: int = 42,
+            reseed_per_epoch: bool = True, #see PlantMPRADataset.set_epoch()
     ) -> None:
         if sequence_length is not None and sequence_length <= 0:
             raise ValueError("sequence_length must be > 0")
@@ -366,6 +378,8 @@ class DengMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
         self.random_shift = random_shift
         self.shift_prob = shift_prob
         self.max_shift = max_shift
+        self._base_seed = seed
+        self._reseed_per_epoch = reseed_per_epoch
         self._rng = np.random.default_rng(seed)
 
         self._payloads = [str(row["Sequence"]) for row in rows]
@@ -382,6 +396,11 @@ class DengMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]):
 
     def __len__(self) -> int:
         return len(self._payloads)
+
+    def set_epoch(self, epoch: int) -> None:
+        """See PlantMPRADataset.set_epoch()."""
+        if self._reseed_per_epoch:
+            self._rng = np.random.default_rng(self._base_seed + epoch)
 
     def _augment(self, onehot: np.ndarray) -> np.ndarray:
         out = onehot
@@ -418,6 +437,7 @@ class JoresMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             shift_prob: float = 0.5,
             max_shift: int = 15,
             seed: int = 42,
+            reseed_per_epoch: bool = True, #see PlantMPRADataset.set_epoch()
     ) -> None:
         if sequence_length is not None and sequence_length <= 0:
             raise ValueError("sequence_length must be > 0")
@@ -437,6 +457,8 @@ class JoresMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         self.random_shift = random_shift
         self.shift_prob = shift_prob
         self.max_shift = max_shift
+        self._base_seed = seed
+        self._reseed_per_epoch = reseed_per_epoch
         self._rng = np.random.default_rng(seed)
 
         self._payloads = [str(row["sequence"]) for row in rows]
@@ -453,6 +475,11 @@ class JoresMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
 
     def __len__(self) -> int:
         return len(self._payloads)
+
+    def set_epoch(self, epoch: int) -> None:
+        """See PlantMPRADataset.set_epoch()."""
+        if self._reseed_per_epoch:
+            self._rng = np.random.default_rng(self._base_seed + epoch)
 
     def _augment(self, onehot: np.ndarray) -> np.ndarray:
         out = onehot

@@ -24,7 +24,7 @@
     "test_txt": "metadata/test.txt"
   },
   "head": {
-    "head_type": "deepstarr",
+    "head_type": "joresmpra",
     "num_outputs": 4,
     "center_bp": 256,
     "pooling_type": "flatten",

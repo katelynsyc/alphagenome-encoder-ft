@@ -71,7 +71,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hidden_sizes", type=str, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--activation", type=str, default=None, choices=["relu", "gelu"])
-    parser.add_argument("--head_type", type=str, default=None, choices=["mpra", "deepstarr", "deeptomato"])
+    parser.add_argument("--head_type", type=str, default=None, choices=["mpra", "joresmpra", "deeptomato"])
     parser.add_argument("--num_outputs", type=int, default=None)
 
     parser.add_argument("--optimizer", type=str, default=None, choices=["adam", "adamw"])

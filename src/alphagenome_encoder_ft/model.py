@@ -194,6 +194,3 @@ class AlphaGenomeEncoderModel(nn.Module):
         model.eval()
         return model
 
-
-# Backward compatibility alias.
-EncoderMPRAModel = AlphaGenomeEncoderModel

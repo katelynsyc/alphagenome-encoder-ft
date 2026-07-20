@@ -1,5 +1,5 @@
 {
-  "_comment": "Hyperparameters transferred from optimal_WTC11.json, reformatted to match the tomatompra.json config schema, but this is for Jores dataset.",
+  "_comment": "Hyperparameters for Jores dataset.",
   "data": {
     "input_tsv": null,
     "sequence_length": 170,
@@ -8,11 +8,11 @@
     "barcode_min_eval": 1,
     "reverse_complement": false,
     "rc_prob": 0.5,
-    "random_shift": false,
+    "random_shift": true,
     "shift_prob": 0.5,
     "max_shift": 15,
     "subset_frac": 1.0,
-    "num_workers": 0,
+    "num_workers": 4,
     "pin_memory": false,
     "val_chroms": [],
     "test_chroms": [],
@@ -22,7 +22,7 @@
     "val_frac": 0.1
   },
   "head": {
-    "head_type": "deepstarr",
+    "head_type": "joresmpra",
     "num_outputs": 5,
     "center_bp": 256,
     "pooling_type": "flatten",
@@ -35,15 +35,18 @@
     "learning_rate": 5e-5,
     "weight_decay": 1e-6,
     "lr_scheduler": "constant",
+    "plateau_patience": 4,
     "gradient_accumulation_steps": 1,
     "gradient_clip": null
   },
   "stage": {
-    "num_epochs": 30,
-    "early_stopping_patience": 5,
+    "num_epochs": 50,
+    "early_stopping_patience": 10,
     "val_evals_per_epoch": 1,
-    "second_stage_lr": null,
-    "second_stage_epochs": 50
+    "second_stage_lr": 1e-6,
+    "second_stage_epochs": 250,
+    "second_stage_lr_scheduler": "plateau",
+    "second_stage_dropout": null
   },
   "cached_embeddings": {
     "use_cached_embeddings": false,
@@ -60,7 +63,7 @@
   },
   "runtime": {
     "device": null,
-    "use_amp": false,
+    "use_amp": true,
     "seed": 42
   }
 }

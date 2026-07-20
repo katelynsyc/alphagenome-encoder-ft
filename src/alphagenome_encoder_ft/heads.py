@@ -147,13 +147,13 @@ class MPRAHead(nn.Module):
         return self._pool_predictions(preds)
 
 
-class DeepSTARRHead(MPRAHead):
-    """Dual-output regression head for Drosophila STARR-seq (dev + hk).
+class JoresMPRAHead(MPRAHead):
+    """Multi-output head, utilized for Jores et al. 2026 dataset.
 
     Mirrors Al Murphy's JAX ``DeepSTARRHead`` in ``alphagenome_ft_mpra/mpra_heads.py``:
     same pooling modes, same configuration surface, same ``LayerNorm → MLP → Linear``
     layout. Architecture and state_dict keys are inherited from :class:`MPRAHead`,
-    with ``num_outputs`` defaulted to 2 (``dev``, ``hk`` enhancer activity).
+    with ``num_outputs`` defaulted to 5 .
     """
 
     def __init__(
@@ -163,7 +163,7 @@ class DeepSTARRHead(MPRAHead):
         hidden_sizes: int | Sequence[int] = 2048,
         dropout: float | None = 0.5,
         activation: Literal["relu", "gelu"] = "relu",
-        num_outputs: int = 2,
+        num_outputs: int = 5,
     ) -> None:
         super().__init__(
             pooling_type=pooling_type,

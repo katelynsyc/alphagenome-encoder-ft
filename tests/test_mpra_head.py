@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from alphagenome_encoder_ft.config import build_head
-from alphagenome_encoder_ft.heads import DeepSTARRHead, MPRAHead
+from alphagenome_encoder_ft.heads import JoresMPRAHead, MPRAHead
 
 
 @pytest.mark.parametrize("pooling_type", ["flatten", "center", "mean", "sum", "max"])
@@ -53,19 +53,19 @@ def test_mpra_head_non_flatten_pools_position_scores(pooling_type: str, expected
 
 
 @pytest.mark.parametrize("pooling_type", ["flatten", "center", "mean", "sum", "max"])
-def test_deepstarr_head_output_shape(pooling_type: str):
-    head = DeepSTARRHead(pooling_type=pooling_type, hidden_sizes=16, center_bp=256)
+def test_joresmpra_head_output_shape(pooling_type: str):
+    head = JoresMPRAHead(pooling_type=pooling_type, hidden_sizes=16, center_bp=256)
     encoder_output = torch.randn(4, 3, 1536)
     preds = head(encoder_output)
-    assert preds.shape == (4, 2)
+    assert preds.shape == (4, 5)
 
 
-def test_deepstarr_head_matches_in_tree_defaults():
-    head = DeepSTARRHead()
+def test_joresmpra_head_matches_in_tree_defaults():
+    head = JoresMPRAHead()
     encoder_output = torch.randn(2, 2, 1536)
     preds = head(encoder_output)
-    assert preds.shape == (2, 2)
-    assert head.num_outputs == 2
+    assert preds.shape == (2, 5)
+    assert head.num_outputs == 5
     assert head.pooling_type == "flatten"
     assert head.hidden_sizes == [2048]
 
@@ -83,12 +83,12 @@ def test_build_head_registry_mpra_default():
     assert preds.shape == (2,)
 
 
-def test_build_head_registry_deepstarr():
+def test_build_head_registry_joresmpra():
     head = build_head(
-        "deepstarr",
+        "joresmpra",
         {"pooling_type": "flatten", "hidden_sizes": [16], "dropout": 0.5, "num_outputs": 2},
     )
-    assert isinstance(head, DeepSTARRHead)
+    assert isinstance(head, JoresMPRAHead)
     preds = head(torch.randn(2, 3, 1536))
     assert preds.shape == (2, 2)
 

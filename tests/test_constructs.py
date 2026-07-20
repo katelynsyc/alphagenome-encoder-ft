@@ -10,7 +10,7 @@ from alphagenome_pytorch.utils.sequence import sequence_to_onehot
 from alphagenome_encoder_ft.config import TrainConfig
 from alphagenome_encoder_ft.constructs import ConstructSpec
 from alphagenome_encoder_ft.heads import MPRAHead
-from alphagenome_encoder_ft.model import EncoderMPRAModel
+from alphagenome_encoder_ft.model import AlphaGenomeEncoderModel
 from alphagenome_encoder_ft.train import save_checkpoint
 
 
@@ -125,7 +125,7 @@ def test_construct_spec_rejects_missing_required_parts_for_onehot():
 def test_from_checkpoint_roundtrip_minimal_without_pretrained_weights(tmp_path: Path):
     torch.manual_seed(0)
     construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    model = EncoderMPRAModel(
+    model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
         MPRAHead(pooling_type="flatten", hidden_sizes=8),
         construct_spec=construct_spec,
@@ -146,7 +146,7 @@ def test_from_checkpoint_roundtrip_minimal_without_pretrained_weights(tmp_path: 
         epoch=1,
     )
 
-    restored = EncoderMPRAModel.from_checkpoint(
+    restored = AlphaGenomeEncoderModel.from_checkpoint(
         checkpoint_path,
         device="cpu",
         backbone_factory=DummyAlphaGenome,
@@ -160,7 +160,7 @@ def test_from_checkpoint_roundtrip_minimal_without_pretrained_weights(tmp_path: 
 def test_from_checkpoint_roundtrip_full(tmp_path: Path):
     torch.manual_seed(0)
     construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    model = EncoderMPRAModel(
+    model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
         MPRAHead(pooling_type="flatten", hidden_sizes=8),
         construct_spec=construct_spec,
@@ -177,7 +177,7 @@ def test_from_checkpoint_roundtrip_full(tmp_path: Path):
         epoch=1,
     )
 
-    restored = EncoderMPRAModel.from_checkpoint(
+    restored = AlphaGenomeEncoderModel.from_checkpoint(
         checkpoint_path,
         device="cpu",
         backbone_factory=DummyAlphaGenome,
@@ -188,7 +188,7 @@ def test_from_checkpoint_roundtrip_full(tmp_path: Path):
 def test_from_checkpoint_defaults_to_inferred_device(tmp_path: Path):
     torch.manual_seed(0)
     construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    model = EncoderMPRAModel(
+    model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
         MPRAHead(pooling_type="flatten", hidden_sizes=8),
         construct_spec=construct_spec,
@@ -205,7 +205,7 @@ def test_from_checkpoint_defaults_to_inferred_device(tmp_path: Path):
         epoch=1,
     )
 
-    restored = EncoderMPRAModel.from_checkpoint(
+    restored = AlphaGenomeEncoderModel.from_checkpoint(
         checkpoint_path,
         backbone_factory=DummyAlphaGenome,
     )
@@ -219,7 +219,7 @@ def test_from_checkpoint_defaults_to_inferred_device(tmp_path: Path):
 
 
 def test_from_checkpoint_rejects_head_only_checkpoint(tmp_path: Path):
-    model = EncoderMPRAModel(DummyAlphaGenome(), MPRAHead(pooling_type="flatten", hidden_sizes=8))
+    model = AlphaGenomeEncoderModel(DummyAlphaGenome(), MPRAHead(pooling_type="flatten", hidden_sizes=8))
     model.initialize_head(sequence_length=2, device="cpu")
 
     checkpoint_path = save_checkpoint(
@@ -232,7 +232,7 @@ def test_from_checkpoint_rejects_head_only_checkpoint(tmp_path: Path):
     )
 
     with pytest.raises(ValueError, match="Head-only checkpoints"):
-        EncoderMPRAModel.from_checkpoint(
+        AlphaGenomeEncoderModel.from_checkpoint(
             checkpoint_path,
             device="cpu",
             backbone_factory=DummyAlphaGenome,
@@ -242,7 +242,7 @@ def test_from_checkpoint_rejects_head_only_checkpoint(tmp_path: Path):
 def test_predict_sequences_matches_direct_forward():
     torch.manual_seed(0)
     construct_spec = ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T")
-    model = EncoderMPRAModel(
+    model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
         MPRAHead(pooling_type="flatten", hidden_sizes=8),
         construct_spec=construct_spec,
@@ -261,7 +261,7 @@ def test_predict_sequences_matches_direct_forward():
 
 def test_predict_sequences_batches_inputs_and_organism_idx():
     torch.manual_seed(0)
-    model = EncoderMPRAModel(
+    model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
         MPRAHead(pooling_type="flatten", hidden_sizes=8),
     )
@@ -285,7 +285,7 @@ def test_predict_sequences_batches_inputs_and_organism_idx():
 
 def test_predict_sequences_without_construct_mode_treats_inputs_as_final_sequences():
     torch.manual_seed(0)
-    model = EncoderMPRAModel(
+    model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
         MPRAHead(pooling_type="flatten", hidden_sizes=8),
         construct_spec=ConstructSpec(left_adapter="A", right_adapter="C", promoter_seq="G", barcode_seq="T"),
@@ -302,7 +302,7 @@ def test_predict_sequences_without_construct_mode_treats_inputs_as_final_sequenc
 
 def test_predict_sequences_requires_construct_spec_when_construct_mode_is_set():
     torch.manual_seed(0)
-    model = EncoderMPRAModel(
+    model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
         MPRAHead(pooling_type="flatten", hidden_sizes=8),
     )
@@ -314,7 +314,7 @@ def test_predict_sequences_requires_construct_spec_when_construct_mode_is_set():
 
 def test_predict_sequences_rejects_mismatched_lengths():
     torch.manual_seed(0)
-    model = EncoderMPRAModel(
+    model = AlphaGenomeEncoderModel(
         DummyAlphaGenome(),
         MPRAHead(pooling_type="flatten", hidden_sizes=8),
     )

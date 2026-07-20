@@ -69,6 +69,7 @@ class DataConfig:
     split_mode: str = "chrom"  # "chrom", "random", "deng" or "jores"
     train_frac: float = 0.8
     val_frac: float = 0.1
+    reseed_per_epoch: bool = True  # see PlantMPRADataset.set_epoch(): reproducible augmentation across preemption/resume
 
     def __post_init__(self) -> None:
         if self.sequence_length is not None and self.sequence_length <= 0:
@@ -119,8 +120,8 @@ class HeadConfig:
             raise ValueError("head.dropout must be in [0, 1)")
         if self.activation not in {"relu", "gelu"}:
             raise ValueError("head.activation must be 'relu' or 'gelu'")
-        if self.head_type not in {"mpra", "deepstarr", "deeptomato"}:
-            raise ValueError("head.head_type must be one of mpra, deepstarr, deeptomato")
+        if self.head_type not in {"mpra", "joresmpra", "deeptomato"}:
+            raise ValueError("head.head_type must be one of mpra, joresmpra, deeptomato")
         if self.num_outputs < 1:
             raise ValueError("head.num_outputs must be >= 1")
 
@@ -169,6 +170,16 @@ class StageConfig:
     second_stage_lr: float | None = None
     second_stage_epochs: int = 10
     resume_from_stage2: bool = False
+    auto_resume: bool = True  # resume each stage from its last.pt if one exists; False forces always-fresh runs
+
+    # None = inherit optim.lr_scheduler. Lets stage 2 turn on decay (e.g. "plateau")
+    # without affecting stage 1, while still sharing optim.plateau_factor/patience/
+    # mode/min_lr -- those stay inert for stage 1 as long as its scheduler is "constant".
+    second_stage_lr_scheduler: str | None = None
+
+    # None = inherit head.dropout, so stage 2 (full encoder+head fine-tuning) keeps
+    # stage 1's (head-only) rate unless explicitly overridden.
+    second_stage_dropout: float | None = None
 
     def __post_init__(self) -> None:
         if self.num_epochs <= 0:
@@ -181,6 +192,12 @@ class StageConfig:
             raise ValueError("stage.second_stage_lr must be > 0 when set")
         if self.second_stage_epochs <= 0:
             raise ValueError("stage.second_stage_epochs must be > 0")
+        if self.second_stage_lr_scheduler is not None and self.second_stage_lr_scheduler not in {
+            "constant", "cosine", "plateau",
+        }:
+            raise ValueError("stage.second_stage_lr_scheduler must be one of constant, cosine, plateau")
+        if self.second_stage_dropout is not None and not 0 <= self.second_stage_dropout < 1:
+            raise ValueError("stage.second_stage_dropout must be in [0, 1)")
 
 
 @dataclass
@@ -296,9 +313,9 @@ def merge_train_config(config: TrainConfig, overrides: Mapping[str, Any]) -> Tra
 # head registry: maps a ``head_type`` string to the corresponding head class.
 # kept lazy to avoid a circular import on heads.py at module load.
 def _resolve_head_class(head_type: str):
-    from .heads import MPRAHead, DeepSTARRHead
+    from .heads import MPRAHead, JoresMPRAHead
 
-    registry = {"mpra": MPRAHead, "deepstarr": DeepSTARRHead}
+    registry = {"mpra": MPRAHead, "joresmpra": JoresMPRAHead}
     if head_type not in registry:
         raise ValueError(
             f"Unknown head_type {head_type!r}; known: {sorted(registry)}"
