@@ -101,14 +101,14 @@ class MPRAHead(nn.Module):
             x = linear(x)
             if self.dropout is not None:
                 x = nn.functional.dropout(x, p=self.dropout, training=self.training) #zero out p data points during training only
-            x = _make_activation(self.activation)(x)
+            x = _make_activation(self.activation)(x) #turns neuron on or not at threshold
         return x
 
     def _normalize_encoder_output(self, encoder_output: torch.Tensor) -> torch.Tensor:
         x = encoder_output
         if x.ndim == 3 and x.shape[-1] != ENCODER_DIM and x.shape[1] == ENCODER_DIM: #make sure encoder dim is the third dim
-            x = x.transpose(1, 2)
-        return self.norm(x)
+            x = x.transpose(1, 2) #now (batch, seq_length, features), will normalize over features
+        return self.norm(x) #control scale for stable gradients, prevents huge weight updates in backpropagation // exploding gradients bc they're multiplied across layers
 
     def _pool_predictions(self, preds: torch.Tensor) -> torch.Tensor:
         # preds: (B, L, K). For K==1, squeeze(-1) to preserve the legacy (B,) output.
@@ -137,10 +137,10 @@ class MPRAHead(nn.Module):
     def forward(self, encoder_output: torch.Tensor) -> torch.Tensor: #when you call head(encoder_output)
         x = self._normalize_encoder_output(encoder_output) #ensure correct shape
         if self.pooling_type == "flatten":
-            x = x.flatten(1)
-            x = self._apply_hidden_layers(x)
+            x = x.flatten(1) #(batch, collapsed) = compresses all dims after batch together (seq_length & features all combos put into 1D)
+            x = self._apply_hidden_layers(x) #compress input dim to output dim of layer
             preds = self.output_layer(x)
-            return preds.squeeze(-1) if self.num_outputs == 1 else preds
+            return preds.squeeze(-1) if self.num_outputs == 1 else preds #if only 1 output, get rid of second dim
 
         x = self._apply_hidden_layers(x)
         preds = self.output_layer(x)

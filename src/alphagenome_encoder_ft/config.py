@@ -11,14 +11,14 @@ from typing import Any, Mapping
 
 def parse_hidden_sizes(value: int | str | list[int] | tuple[int, ...]) -> list[int]:
     if isinstance(value, int):
-        sizes = [value]
+        sizes = [value] #one layer
     elif isinstance(value, str):
         stripped = value.strip()
         if not stripped:
             raise ValueError("hidden_sizes must not be empty")
         sizes = [int(piece.strip()) for piece in stripped.split(",") if piece.strip()]
     else:
-        sizes = [int(piece) for piece in value]
+        sizes = [int(piece) for piece in value] #multiple layers w/sizes
     if not sizes or any(size <= 0 for size in sizes):
         raise ValueError("hidden_sizes must contain positive integers")
     return sizes
@@ -31,14 +31,14 @@ def _ensure_mapping(value: Any, *, section: str) -> Mapping[str, Any]:
 
 
 def _deep_merge(base: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
-    merged = copy.deepcopy(base)
+    merged = copy.deepcopy(base) #indepdendent copy of base, recursively
     for key, value in overrides.items():
         if value is None:
             continue
-        if isinstance(value, Mapping) and isinstance(merged.get(key), dict):
+        if isinstance(value, Mapping) and isinstance(merged.get(key), dict): #if there's an override dict-like object and already key, need to override
             merged[key] = _deep_merge(merged[key], value)
         else:
-            merged[key] = value
+            merged[key] = value #key doesn't exist yet, add it
     return merged
 
 
@@ -173,7 +173,7 @@ class StageConfig:
     auto_resume: bool = True  # resume each stage from its last.pt if one exists; False forces always-fresh runs
 
     # None = inherit optim.lr_scheduler. Lets stage 2 turn on decay (e.g. "plateau")
-    # without affecting stage 1, while still sharing optim.plateau_factor/patience/
+    # without affecting stage 1, while still sharing decay factor optim.plateau_factor/patience/
     # mode/min_lr -- those stay inert for stage 1 as long as its scheduler is "constant".
     second_stage_lr_scheduler: str | None = None
 
@@ -232,8 +232,8 @@ class CachedEmbeddingsConfig:
 
 
 @dataclass
-class TrainConfig:
-    data: DataConfig = field(default_factory=DataConfig)
+class TrainConfig: #combine all the sections of the json config
+    data: DataConfig = field(default_factory=DataConfig) #the harcoded defaults from above
     head: HeadConfig = field(default_factory=HeadConfig)
     optim: OptimConfig = field(default_factory=OptimConfig)
     stage: StageConfig = field(default_factory=StageConfig)
@@ -251,7 +251,7 @@ class TrainConfig:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def head_kwargs(self) -> dict[str, Any]:
+    def head_kwargs(self) -> dict[str, Any]: #to get embedded into saved .pt file to rebuild model
         return {
             "pooling_type": self.head.pooling_type,
             "center_bp": self.head.center_bp,
@@ -278,11 +278,11 @@ class TrainConfig:
         unknown_sections = sorted(
             key for key in set(raw_config) - allowed_sections if not str(key).startswith("_")
         )
-        if unknown_sections:
+        if unknown_sections: #check for other sections
             raise ValueError(f"Unknown config sections: {', '.join(unknown_sections)}")
 
-        return cls(
-            data=DataConfig(**dict(_ensure_mapping(raw_config.get("data", {}), section="data"))),
+        return cls( #ex. DataConfig(batch_size=64, split_mode="jores", etc.)
+            data=DataConfig(**dict(_ensure_mapping(raw_config.get("data", {}), section="data"))), #pulls config value or defaults to hardcoded
             head=HeadConfig(**dict(_ensure_mapping(raw_config.get("head", {}), section="head"))),
             optim=OptimConfig(**dict(_ensure_mapping(raw_config.get("optim", {}), section="optim"))),
             stage=StageConfig(**dict(_ensure_mapping(raw_config.get("stage", {}), section="stage"))),
@@ -297,16 +297,16 @@ class TrainConfig:
         )
 
 
-def load_train_config(path: str | Path | None) -> TrainConfig:
+def load_train_config(path: str | Path | None) -> TrainConfig: #json.load, then make config from it
     if path is None:
-        return TrainConfig()
+        return TrainConfig() #class-defined degaults above
     with open(path) as handle:
         raw_config = json.load(handle)
     return TrainConfig.from_dict(raw_config)
 
 
 def merge_train_config(config: TrainConfig, overrides: Mapping[str, Any]) -> TrainConfig:
-    merged = _deep_merge(config.to_dict(), overrides)
+    merged = _deep_merge(config.to_dict(), overrides) #takes created TrainConfig (with json), converts bact to dict, deep merges CLI overrides
     return TrainConfig.from_dict(merged)
 
 
@@ -315,7 +315,7 @@ def merge_train_config(config: TrainConfig, overrides: Mapping[str, Any]) -> Tra
 def _resolve_head_class(head_type: str):
     from .heads import MPRAHead, JoresMPRAHead
 
-    registry = {"mpra": MPRAHead, "joresmpra": JoresMPRAHead}
+    registry = {"mpra": MPRAHead, "joresmpra": JoresMPRAHead} #maps string to actual class
     if head_type not in registry:
         raise ValueError(
             f"Unknown head_type {head_type!r}; known: {sorted(registry)}"
@@ -323,7 +323,7 @@ def _resolve_head_class(head_type: str):
     return registry[head_type]
 
 
-def build_head(head_type: str, head_config: Mapping[str, Any]):
+def build_head(head_type: str, head_config: Mapping[str, Any]): #used to rebuild model heads & initialize fresh heads
     """Instantiate a head by ``head_type`` string.
 
     Unknown keys (e.g. a stray ``head_type`` field) and None-valued keys are dropped
@@ -331,10 +331,10 @@ def build_head(head_type: str, head_config: Mapping[str, Any]):
     for anything omitted.
     """
 
-    cls = _resolve_head_class(head_type)
+    cls = _resolve_head_class(head_type) #head module class like JonesMPRAHead
     import inspect
 
-    accepted = set(inspect.signature(cls).parameters)
+    accepted = set(inspect.signature(cls).parameters) #inspects init signature to get param names associated with this class
     kwargs = {
         k: v for k, v in head_config.items()
         if k in accepted and v is not None

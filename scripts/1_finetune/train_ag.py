@@ -418,10 +418,19 @@ def run(
         try:
             import wandb
 
+            # hidden_sizes is a list, which wandb's Parallel Coordinates plot can't use as an
+            # axis (it only accepts scalar config values). Flatten it into scalar keys here
+            # purely for wandb display -- config itself (used for model/checkpoint/resume) is untouched.
+            flat_config = config.to_dict()
+            hidden_sizes = flat_config["head"]["hidden_sizes"]
+            for i, size in enumerate(hidden_sizes):
+                flat_config["head"][f"hidden_layer_{i + 1}"] = size
+            flat_config["head"]["num_hidden_layers"] = len(hidden_sizes)
+
             wandb.init(
                 project=config.logging.wandb_project,
                 name=config.logging.wandb_name,
-                config=config.to_dict(),
+                config=flat_config,
                 id=stable_run_id(config.checkpoint.checkpoint_dir, config),
                 resume="allow",
             )
@@ -527,6 +536,10 @@ def run(
             test_payload = {"stage": stage_name, "epoch": test_epoch, "event": "final_test"}
             for key, value in test_metrics.items():
                 test_payload[f"test_{key}"] = value
+            # Tune's OptunaSearch/ASHAScheduler expect every reported result to carry
+            # val_pearson (strict metric checking) -- this event only has test_* metrics
+            # otherwise, so backfill with this stage's best validation pearson.
+            test_payload["val_pearson"] = stage_result.get("best_monitor", float("nan"))
             active_epoch_logger(test_payload)
         if stage_name == final_stage:
             final_metrics = test_metrics

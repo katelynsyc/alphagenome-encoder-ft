@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import random
 from contextlib import nullcontext
 from pathlib import Path
@@ -380,6 +381,7 @@ def save_checkpoint(
 
     checkpoint_path = Path(path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = checkpoint_path.with_name(f"{checkpoint_path.name}.{os.getpid()}.tmp")
 
     payload: dict[str, Any] = {
         "save_mode": save_mode,
@@ -403,7 +405,18 @@ def save_checkpoint(
     if training_state is not None:
         payload["training_state"] = training_state
 
-    torch.save(payload, checkpoint_path)
+    # Write to a process-unique temp file first, then atomically rename into place. torch.save
+    # streams directly into whatever file it's given with no atomicity of its own -- writing
+    # straight to checkpoint_path means a SIGKILL mid-write (e.g. a slow_nice preemption landing
+    # during a slow GPFS write) leaves a truncated file under the "last.pt" name permanently,
+    # since it's overwritten in place every epoch with nothing older to fall back to. Renaming a
+    # fully-written tmp file over it instead means checkpoint_path is always either the old,
+    # complete checkpoint or the new, complete one -- os.replace is a single atomic filesystem
+    # rename, never a partial state, even if killed mid-rename. The pid suffix keeps two
+    # processes that briefly both hold this checkpoint_dir (e.g. an old and new Ray actor
+    # overlapping after a restart) from interleaving writes into the same tmp file.
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, checkpoint_path)
     return checkpoint_path
 
 
