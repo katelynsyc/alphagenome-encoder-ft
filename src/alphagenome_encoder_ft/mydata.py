@@ -547,13 +547,21 @@ def create_deng_splits(
 def create_jores_splits(
     input_tsv: str | Path,
     seed: int = 42,
+    subset_frac: float = 1.0,
     **dataset_kwargs,
     ) -> tuple[JoresMPRADataset, JoresMPRADataset, JoresMPRADataset]:
     """Build train/val/test splits from modelling_data_tamsACR.tsv's own 'set' column.
 
     Split is already fixed per-row in the source file, so this just partitions rows by that column.
     Augmentation is applied only to the train split.
+
+    subset_frac randomly downsamples the train and val rows (without replacement) to that
+    fraction of their original size -- test rows are always left at full size, regardless of
+    subset_frac, so held-out evaluation stays comparable across differently-downsampled runs.
     """
+    if not 0 < subset_frac <= 1:
+        raise ValueError("subset_frac must be in (0, 1]")
+
     all_rows = _read_custom_tsv(input_tsv)
     rows_by_split: dict[str, list[dict[str, str]]] = {"train": [], "val": [], "test": []} #set up bins
     for row in all_rows:
@@ -561,7 +569,16 @@ def create_jores_splits(
         if split_name not in rows_by_split:
             raise ValueError(f"Unexpected 'set' value {split_name!r} in {input_tsv}")
         rows_by_split[split_name].append(row)
-    
+
+    if subset_frac < 1.0:
+        rng = np.random.default_rng(seed)
+        for split_name in ("train", "val"):  # test is deliberately excluded -- kept full size
+            rows = rows_by_split[split_name]
+            if rows:
+                sample_size = max(1, int(round(len(rows) * subset_frac)))
+                sample_indices = rng.choice(len(rows), size=sample_size, replace=False)
+                rows_by_split[split_name] = [rows[int(idx)] for idx in sorted(sample_indices.tolist())]
+
     noaug_kwargs = {**dataset_kwargs, "reverse_complement": False, "random_shift": False}
 
     train_dataset = JoresMPRADataset(rows_by_split["train"], seed=seed, **dataset_kwargs)
@@ -570,6 +587,58 @@ def create_jores_splits(
 
     return train_dataset, val_dataset, test_dataset
 
+
+# Prefix on the `id` column -> species (modelling_data_tamsACR.tsv has no dedicated
+# species_ID column). Everything else (35S, TBS-, gypsy-, etc.) is a synthetic/control
+# sequence, not a real species, and falls into build_species_masks's "Other" bucket.
+JORES_SPECIES_PREFIXES = {
+    "Arabidopsis": ("At-",),
+    "Maize": ("Zm-",),
+    "Sorghum": ("Sb-",),
+    "Tomato": ("Sl-", "Solyc"),
+}
+
+
+def build_species_masks(ids: list[str]) -> dict[str, np.ndarray]:
+    """species name -> boolean numpy mask, aligned row-for-row to `ids`. Includes
+    an "Other" bucket for ids that don't match any defined species prefix."""
+    masks = {
+        species: np.array([str(row_id).startswith(prefixes) for row_id in ids])
+        for species, prefixes in JORES_SPECIES_PREFIXES.items()
+    }
+    any_matched = np.any(list(masks.values()), axis=0)
+    masks["Other"] = ~any_matched
+    return masks
+
+
+def summarize_species_masks(
+    input_tsv: str | Path, split: str = "test",
+) -> tuple[dict[str, np.ndarray], list[dict[str, str]]]:
+    """Print per-species counts for `split` and return (masks, split_rows).
+
+    Uses the exact same 'set'-column filter (and therefore row order) as
+    create_jores_splits, so masks[species] can be indexed directly against
+    anything built from a JoresMPRADataset(rows_by_split[split], ...) constructed
+    from the same input_tsv -- e.g. test_dataset from create_jores_splits.
+    """
+    all_rows = _read_custom_tsv(input_tsv)
+    split_rows = [row for row in all_rows if row["set"] == split]
+    ids = [row["id"] for row in split_rows]
+
+    masks = build_species_masks(ids)
+
+    print(f"{split!r} split: {len(split_rows)} total sequences")
+    for name, mask in masks.items():
+        n = int(mask.sum())
+        pct = 100 * n / len(split_rows) if split_rows else float("nan")
+        print(f"  {name:<12} {n:>6} ({pct:.2f}%)")
+
+    other_ids = [row["id"] for row, keep in zip(split_rows, masks["Other"]) if keep]
+    if other_ids:
+        print(f"\n{len(other_ids)} unmatched ids in {split!r} (showing up to 20):")
+        print(other_ids[:20])
+
+    return masks, split_rows
 
 
 def create_random_splits(

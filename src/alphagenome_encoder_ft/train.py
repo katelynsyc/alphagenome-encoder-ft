@@ -28,30 +28,30 @@ from .config import OptimConfig, TrainConfig
 from .model import AlphaGenomeEncoderModel
 
 
-def _capture_rng_state() -> dict[str, Any]:
+def _capture_rng_state() -> dict[str, Any]: #captures current state of all random number generators being used, for reproducibility
     state: dict[str, Any] = {
-        "torch": torch.get_rng_state(),
+        "torch": torch.get_rng_state(), 
         "numpy": np.random.get_state(),
         "python": random.getstate(),
     }
-    if torch.cuda.is_available():
+    if torch.cuda.is_available(): 
         state["torch_cuda"] = torch.cuda.get_rng_state_all()
     return state
 
 
-def _restore_rng_state(state: dict[str, Any]) -> None:
+def _restore_rng_state(state: dict[str, Any]) -> None: 
     # torch.load(..., map_location=...) remaps every tensor in the checkpoint -- including
     # these RNG-state bytes -- onto that device. torch.get_rng_state()/get_rng_state_all()
     # always represent RNG state as CPU ByteTensors regardless of which device captured it, and
     # torch.set_rng_state() requires exactly that, so force back to CPU before restoring.
-    torch.set_rng_state(state["torch"].cpu())
+    torch.set_rng_state(state["torch"].cpu()) 
     np.random.set_state(state["numpy"])
     random.setstate(state["python"])
     if torch.cuda.is_available() and "torch_cuda" in state:
         torch.cuda.set_rng_state_all([s.cpu() for s in state["torch_cuda"]])
 
 
-def _set_dataset_epoch(dataset, epoch: int | float) -> None:
+def _set_dataset_epoch(dataset, epoch: int | float) -> None: #synchronize dataset shuffling current epoch number
     """Call dataset.set_epoch(epoch) if the dataset supports it, unwrapping one level of
     Subset first (create_random_splits/create_deng_splits wrap datasets in Subset). No-op for
     dataset types that don't implement set_epoch (e.g. LentiMPRADataset/DeepSTARRDataset).
@@ -62,10 +62,10 @@ def _set_dataset_epoch(dataset, epoch: int | float) -> None:
     plain int seed, and epoch_number always represents one whole epoch regardless of start_epoch's
     fractional offset, so rounding loses nothing semantically.
     """
-    target = dataset.dataset if isinstance(dataset, Subset) else dataset
-    set_epoch = getattr(target, "set_epoch", None)
-    if set_epoch is not None:
-        set_epoch(int(round(epoch)))
+    target = dataset.dataset if isinstance(dataset, Subset) else dataset #unwrap subset
+    set_epoch = getattr(target, "set_epoch", None) #check if set_epoch exists
+    if set_epoch is not None: 
+        set_epoch(int(round(epoch))) #set the epoch
 
 
 def _autocast_context(device: torch.device, use_amp: bool):
@@ -80,10 +80,10 @@ def _default_loss_fn(preds: Tensor, targets: Tensor) -> Tensor:
 
 def _unpack_batch(batch: tuple[Tensor, ...]) -> tuple[Tensor, Tensor, Tensor | None]:
     """Datasets may yield (sequences, targets) or (sequences, targets, sample_weight)."""
-    if len(batch) == 3:
+    if len(batch) == 3: 
         return batch
     sequences, targets = batch
-    return sequences, targets, None
+    return sequences, targets, None #discard the weights
 
 
 def _compute_loss( #per sample loss has a barcode-count weight during training only
@@ -93,7 +93,7 @@ def _compute_loss( #per sample loss has a barcode-count weight during training o
     loss_fn: Callable[[Tensor, Tensor], Tensor],
 ) -> Tensor:
     if weights is None:
-        return loss_fn(preds, targets) #already has reduction as mean, so will give 1 scalar
+        return loss_fn(preds, targets) #already has reduction as mean, so will give 1 scalar loss value
     # per-sample MSE, weighted by e.g. barcode-count confidence, then averaged.
     per_sample = F.mse_loss(preds.float(), targets.float(), reduction="none") #(B, num_outputs)
     if per_sample.ndim > 1:
@@ -860,7 +860,13 @@ def run_training_stage(
         print(" | ".join(metrics_parts))
 
         if epoch_callback is not None:
-            payload: dict[str, Any] = {"stage": stage, "epoch": float(epoch_number)}
+            # epoch_idx + 1 counts epochs completed within *this* run_training_stage call --
+            # unlike epoch_number (= start_epoch + epoch_idx + 1), it doesn't carry stage2's
+            # start_epoch=stage1 best_epoch offset, and it resumes correctly across preemption
+            # since epoch_idx itself resumes from the checkpointed epochs_done above. Lets
+            # callers (e.g. Ray Tune schedulers) measure progress since this stage began without
+            # needing to track any state of their own.
+            payload: dict[str, Any] = {"stage": stage, "epoch": float(epoch_number), "stage_epoch": float(epoch_idx + 1)}
             _add_metrics_to_payload(payload, "train", train_metrics)
             if val_metrics is not None:
                 _add_metrics_to_payload(payload, "val", val_metrics)

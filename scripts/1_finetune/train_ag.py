@@ -290,6 +290,7 @@ def _make_datasets(config: TrainConfig) -> tuple[Any, Any, Any]:
         train_dataset, val_dataset, test_dataset = create_jores_splits(
             config.data.input_tsv,
             seed=config.runtime.seed,
+            subset_frac=config.data.subset_frac,
             sequence_length=config.data.sequence_length,
             reverse_complement=config.data.reverse_complement,
             rc_prob=config.data.rc_prob,
@@ -448,7 +449,9 @@ def run(
                 strip_prefix = "test_" if is_test else "train_"
                 payload = {"epoch": epoch}
                 for key, value in metrics.items():
-                    if key in {"stage", "epoch", "event"}:
+                    # stage_epoch is Ray Tune/ASHA-only bookkeeping (see train_ag_tune.py) --
+                    # excluded here so it never creates its own wandb panel.
+                    if key in {"stage", "epoch", "event", "stage_epoch"}:
                         continue
                     clean_key = key[len(strip_prefix):] if key.startswith(strip_prefix) else key
                     payload[f"{section}/{stage}/{clean_key}"] = value

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -12,9 +13,19 @@ from alphagenome_pytorch import AlphaGenome
 from alphagenome_pytorch.extensions.finetuning.transfer import load_trunk, remove_all_heads
 from alphagenome_pytorch.utils.sequence import sequence_to_onehot_tensor
 
-from .config import HeadConfig, build_head
+from .config import HeadConfig, TrainConfig, build_head
 from .constructs import ConstructSpec
 from .heads import MPRAHead
+
+
+def load_config_from_checkpoint(checkpoint_path: str | Path) -> tuple[TrainConfig, dict[str, Any]]:
+    """Load a checkpoint's saved training config, plus the raw checkpoint dict
+    itself (e.g. for its save_mode/stage/epoch metadata)."""
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    raw_config = checkpoint.get("config")
+    if raw_config is None:
+        raise ValueError(f"Checkpoint does not contain a serialized config: {checkpoint_path}")
+    return TrainConfig.from_dict(raw_config), checkpoint
 
 
 class AlphaGenomeEncoderModel(nn.Module):

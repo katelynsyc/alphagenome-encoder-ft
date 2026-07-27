@@ -9,6 +9,7 @@ a live Ray cluster/head, just the experiment's storage_path/experiment_name dir
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 from collections import Counter
 
@@ -18,6 +19,7 @@ from ray.tune import ExperimentAnalysis
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize Ray Tune trial status from disk")
     parser.add_argument("experiment_dir", help="e.g. results/ray_tune/ag_tune_smoketest_sep")
+    parser.add_argument("--csv", help="Optional path to write the trial results as CSV")
     args = parser.parse_args()
 
     analysis = ExperimentAnalysis(os.path.abspath(args.experiment_dir))
@@ -37,6 +39,14 @@ def main() -> None:
     for val_pearson, trial_id, status, stage, iteration in rows:
         vp = f"{val_pearson:.4f}" if val_pearson is not None else "n/a"
         print(f"{trial_id:<10} {status:<12} {str(stage):<8} {str(iteration):<6} {vp}")
+
+    if args.csv:
+        with open(args.csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["trial_id", "status", "stage", "iteration", "val_pearson"])
+            for val_pearson, trial_id, status, stage, iteration in rows:
+                writer.writerow([trial_id, status, stage, iteration, val_pearson])
+        print(f"\nWrote {len(rows)} rows to {args.csv}")
 
 
 if __name__ == "__main__":

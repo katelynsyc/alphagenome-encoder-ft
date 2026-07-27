@@ -20,6 +20,8 @@ __all__ = [
     "create_deng_splits",
     "JoresMPRADataset",
     "create_jores_splits",
+    "build_species_masks",
+    "summarize_species_masks",
     "LentiMPRADataset",
     "DeepSTARRDataset",
     "DEEPSTARR_ADAPTER_UP",
@@ -31,6 +33,7 @@ __all__ = [
     "LENTIMPRA_PROMOTER",
     "LENTIMPRA_RIGHT_ADAPTER",
     "AlphaGenomeEncoderModel",
+    "load_config_from_checkpoint",
     "MPRAHead",
     "JoresMPRAHead",
     "train_epoch",
@@ -56,7 +59,9 @@ def __getattr__(name: str):
                  "create_deng_splits",
                 "JoresMPRADataset",
                 "create_jores_splits",
-                "create_dataloader"}:
+                "create_dataloader",
+                "build_species_masks",
+                "summarize_species_masks"}:
         from . import mydata
 
         return getattr(mydata, name)
@@ -97,7 +102,7 @@ def __getattr__(name: str):
         from . import config
 
         return getattr(config, name)
-    if name in {"AlphaGenomeEncoderModel"}:
+    if name in {"AlphaGenomeEncoderModel", "load_config_from_checkpoint"}:
         from . import model
 
         return getattr(model, name)

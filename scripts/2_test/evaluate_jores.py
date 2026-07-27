@@ -24,6 +24,7 @@ from alphagenome_encoder_ft import (
     TrainConfig,
     create_dataloader,
     create_jores_splits,
+    load_config_from_checkpoint,
 )
 
 # Order must match JoresMPRADataset._targets (see mydata.py).
@@ -41,14 +42,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use_amp", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pin_memory", action=argparse.BooleanOptionalAction, default=None)
     return parser
-
-
-def _load_config_from_checkpoint(checkpoint_path: Path) -> tuple[TrainConfig, dict[str, Any]]:
-    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-    raw_config = checkpoint.get("config")
-    if raw_config is None:
-        raise ValueError(f"Checkpoint does not contain a serialized config: {checkpoint_path}")
-    return TrainConfig.from_dict(raw_config), checkpoint
 
 
 def _average_ranks(values: np.ndarray) -> np.ndarray:
@@ -182,7 +175,7 @@ def main() -> dict[str, Any]:
     if not checkpoint_path.exists():
         parser.error(f"Checkpoint not found: {checkpoint_path}")
 
-    config, checkpoint = _load_config_from_checkpoint(checkpoint_path)
+    config, checkpoint = load_config_from_checkpoint(checkpoint_path)
 
     if args.input_tsv is not None:
         config.data.input_tsv = args.input_tsv

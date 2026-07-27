@@ -44,6 +44,7 @@ experiment automatically -- see Tuner.can_restore() in main() below.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -66,23 +67,20 @@ from ray.tune.search.optuna import OptunaSearch  # noqa: E402
 
 from alphagenome_encoder_ft import load_train_config, merge_train_config  # noqa: E402
 
-# Ordinal grids for the tuned hyperparameters below -- sampled as indices (trial.suggest_int
-# over range(len(LIST))) rather than trial.suggest_categorical(LIST) so TPE can exploit the
-# ordering between values (index i is "between" i-1 and i+1) instead of treating each choice
-# as an unrelated, equally-dissimilar bucket. Requires each list to be sorted ascending.
-LR_LIST = sorted([
-    mult * (10**exp)
-    for exp in range(-7, -2)       # 10^-7 up to 10^-3
-    for mult in [1, 3, 5, 8]
-])
-#make sure the killed version 
-#it'll probably take a full week
-#do a test run and want it check all of these things while i'm doing this
-#set very low number of trials like 10 from the ray tune and make sure checkpoint is working, that i get weights from both phases
-
-BATCH_SIZES = [16, 32, 64, 128, 256, 512, 1024]
-LINEAR_SIZES = [128, 256, 512, 1024, 2048, 2560, 4096]
-WEIGHT_DECAYS = [1e-8, 1e-7, 1e-6, 1e-5, 1e-4]
+# lr/weight_decay are sampled as continuous log-uniform floats (trial.suggest_float(..., log=True))
+# rather than indices into a hand-picked grid -- TPE's distance model for a Float/Int distribution
+# is a fixed function of the raw numeric value (log(value) here), so this gives it the true,
+# exact distance between any two candidate rates/decays instead of an index-based approximation
+# that's only correct if the original grid happened to be evenly spaced in log space.
+#
+# batch_size/linear layer sizes must be powers of two (hardware/memory alignment), so they're
+# parametrized by their exponent (trial.suggest_int over the exponent, value = 2**exponent).
+# Consecutive exponents are exactly a factor of 2 apart, so uniform spacing in exponent-index
+# space is *exactly* uniform spacing in log2(value) space -- no approximation involved.
+LR_LOW, LR_HIGH = 1e-7, 8e-2
+WEIGHT_DECAY_LOW, WEIGHT_DECAY_HIGH = 1e-8, 1e-4
+BATCH_SIZE_EXP_LOW, BATCH_SIZE_EXP_HIGH = 4, 10  # 2**4=16 .. 2**10=1024
+LINEAR_SIZE_EXP_LOW, LINEAR_SIZE_EXP_HIGH = 7, 12  # 2**7=128 .. 2**12=4096
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -98,41 +96,141 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cpus_per_trial", type=float, default=4.0)
     parser.add_argument("--metric", type=str, default="val_pearson") #optuna uses val pearson to optimize the values & also early stop for ASHA
     parser.add_argument("--mode", type=str, default="max", choices=["max", "min"])
-    parser.add_argument("--max_epochs_per_trial", type=int, default=None, help="ASHA max_t; defaults to stage.num_epochs + stage.second_stage_epochs from --config")
+    parser.add_argument("--max_epochs_per_trial", type=int, default=None, help="ASHA max_t, measured in stage2 epochs (time_attr='stage2_epoch'); defaults to stage.second_stage_epochs from --config")
     return parser
 
 
 def _define_by_run_func(trial: "optuna.Trial") -> dict[str, Any] | None:
     """Conditional search space for OptunaSearch(space=...). Every parameter is defined via
     trial.suggest_* here -- Ray/Optuna drop each one into this trial's config dict under the
-    name given, so train_fn() below reads them back out as tune_config["lr1_idx"], etc.
+    name given, so train_fn() below reads them back out as tune_config["lr1"], etc.
     Returning None (rather than a dict) means there are no extra constant values to merge in;
     everything static comes from --config via load_train_config in train_fn() instead."""
 
     # lr2 <= lr1 (not strictly smaller): nothing downstream requires lr2 < lr1 (config.py only
-    # checks second_stage_lr > 0), and requiring strictly-smaller made lr1_idx=0 an impossible
-    # draw -- lr2_idx would need to range over 0..-1. That used to be handled by raising
-    # optuna.exceptions.TrialPruned() here, but Ray's OptunaSearch doesn't catch TrialPruned
-    # raised from a define-by-run space function the way Optuna's own study.optimize() loop
-    # does -- it propagates all the way up through Tuner.fit() uncaught and crashes the entire
-    # multi-trial run, not just this one sample. Allowing lr2_idx == lr1_idx (both stages at
-    # the same, possibly-smallest, rate) keeps the full LR_LIST range testable for lr1 without
-    # ever hitting that dead end.
-    lr1_idx = trial.suggest_int("lr1_idx", 0, len(LR_LIST) - 1)
-    trial.suggest_int("lr2_idx", 0, lr1_idx)  # second-stage lr, no larger than lr1
+    # checks second_stage_lr > 0). Using lr1 itself as the upper bound (rather than a separate
+    # 0..-1 range trick) keeps the full lr range testable for lr1 while still guaranteeing
+    # lr2 <= lr1 by construction -- no TrialPruned needed (Ray's OptunaSearch doesn't catch
+    # TrialPruned raised from a define-by-run space function the way Optuna's own
+    # study.optimize() loop does -- it propagates uncaught through Tuner.fit() and crashes the
+    # entire multi-trial run, not just this one sample).
+    lr1 = trial.suggest_float("lr1", LR_LOW, LR_HIGH, log=True)
+    trial.suggest_float("lr2", LR_LOW, lr1, log=True)  # second-stage lr, no larger than lr1
 
     num_layers = trial.suggest_int("num_layers", 1, 2)
-    layer1_idx = trial.suggest_int("layer1_idx", 0, len(LINEAR_SIZES) - 1)
+    layer1_size_exp = trial.suggest_int("layer1_size_exp", LINEAR_SIZE_EXP_LOW, LINEAR_SIZE_EXP_HIGH)
     if num_layers == 2:
-        # <= layer1_idx (not layer1_idx - 1): first layer must be larger or the same size
-        trial.suggest_int("layer2_idx", 0, layer1_idx)
+        # <= layer1_size_exp: first layer must be larger or the same size (2**exp is monotonic
+        # in exp, so this bounds the actual layer size exactly the same way).
+        trial.suggest_int("layer2_size_exp", LINEAR_SIZE_EXP_LOW, layer1_size_exp)
 
-    trial.suggest_int("batch_size", 0, len(BATCH_SIZES) - 1)
+    trial.suggest_int("batch_size_exp", BATCH_SIZE_EXP_LOW, BATCH_SIZE_EXP_HIGH)
     trial.suggest_float("s1_dropout", 0.0, 0.6, step=0.05)
     trial.suggest_float("s2_dropout", 0.0, 0.6, step=0.05)
-    trial.suggest_int("weight_decay", 0, len(WEIGHT_DECAYS) - 1)
+    trial.suggest_float("weight_decay", WEIGHT_DECAY_LOW, WEIGHT_DECAY_HIGH, log=True)
 
     return None
+
+
+# Set once in main() before the search_alg is constructed (fresh run or restore), read by
+# _PendingAsksOptunaSearch.suggest() below. A module global rather than a constructor arg
+# deliberately -- restore reconstructs the search algorithm from persisted state internally
+# (Tuner.restore() doesn't even accept a search_alg/tune_config override, see main()), so an
+# instance attribute set at construction time has no guarantee of surviving that
+# reconstruction. Every instance of this class, however it came to exist, reads the same
+# process-global path.
+_PENDING_ASKS_PATH: str | None = None
+
+
+class _PendingAsksOptunaSearch(OptunaSearch):
+    """OptunaSearch that also appends every suggested config to a small side file the instant
+    it's generated -- before Ray Tune has scheduled (or will ever get the chance to schedule)
+    an actor for it.
+
+    Closes one specific gap: Tuner's own experiment_state snapshots are periodic (writes have
+    been observed taking 30-40+ seconds under load, see the "slow experiment checkpoint sync"
+    warning Ray itself logs), so a trial that's freshly suggested but not yet snapshotted when
+    the driver process dies -- crash, NODE_FAIL, or a deliberate kill of a since-orphaned
+    driver -- leaves no record anywhere that Optuna ever proposed it. Nothing can retry a
+    config that was never externalized to disk in any form.
+
+    Deliberately append-only, never rewritten: a write landing mid-append can corrupt at most
+    the one newest line, never the accumulated history above it. Recovery -- matching this
+    file's entries against what Tuner.restore() actually recovered, and re-enqueuing any
+    orphans -- happens once at startup, in _recover_orphaned_asks below, not here.
+    """
+
+    def suggest(self, trial_id: str):
+        config = super().suggest(trial_id)
+        if config is not None and _PENDING_ASKS_PATH is not None:
+            try:
+                with open(_PENDING_ASKS_PATH, "a") as f:
+                    f.write(json.dumps({"trial_id": trial_id, "config": config}) + "\n")
+            except OSError as exc:
+                # A failure to log must never take down trial scheduling -- worst case we
+                # simply don't get to recover this one trial if the driver later dies.
+                print(f"WARNING: failed to log pending ask for trial {trial_id}: {exc}")
+        return config
+
+
+def _recover_orphaned_asks(experiment_dir: str, tuner: "Tuner") -> None:
+    """Best-effort: re-enqueue any trial Optuna suggested (see _PendingAsksOptunaSearch above)
+    that never made it into a persisted experiment_state snapshot before the driver that
+    suggested it died. Only ever called right after a successful Tuner.restore().
+
+    Reaches into Tuner's internal, undocumented attribute chain
+    (tuner._local_tuner._tune_config.search_alg._ot_study) to get the actual live Optuna Study
+    object .fit() is about to use -- there is no public API for this, because restore()
+    reconstructs the search algorithm from disk itself rather than accepting one from the
+    caller (see Tuner.restore()'s signature: no search_alg/tune_config parameter). This is the
+    single most fragile part of this feature -- a future ray[tune] upgrade could rename or
+    restructure this path without warning. Deliberately never allowed to raise past this
+    function: a bug here should degrade to "did not recover 0-2 trials", never to "could not
+    start the sweep at all".
+
+    Tracks which original (orphaned) trial_ids have already been re-enqueued, in a second
+    append-only file, so the same orphaned suggestion isn't replayed again on every future
+    restart -- the orphaned entry's original trial_id never becomes "known" (it was only ever
+    a suggestion, never a real Trial), so without this a leftover entry would otherwise be
+    rediscovered and re-enqueued indefinitely.
+    """
+    pending_path = Path(experiment_dir) / "pending_asks.jsonl"
+    if not pending_path.exists():
+        return
+    recovered_path = Path(experiment_dir) / "pending_asks_recovered.jsonl"
+    try:
+        from ray.tune import ExperimentAnalysis
+
+        known_trial_ids = {t.trial_id for t in ExperimentAnalysis(experiment_dir).trials}
+
+        already_recovered_ids: set[str] = set()
+        if recovered_path.exists():
+            with open(recovered_path) as f:
+                already_recovered_ids = {
+                    json.loads(line)["trial_id"] for line in f if line.strip()
+                }
+
+        orphans = []
+        with open(pending_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if entry["trial_id"] not in known_trial_ids and entry["trial_id"] not in already_recovered_ids:
+                    orphans.append(entry)
+
+        if not orphans:
+            return
+
+        study = tuner._local_tuner._tune_config.search_alg._ot_study
+        with open(recovered_path, "a") as f:
+            for entry in orphans:
+                study.enqueue_trial(entry["config"])
+                f.write(json.dumps({"trial_id": entry["trial_id"]}) + "\n")
+        print(f"Recovered {len(orphans)} orphaned ask(s) from {pending_path}, re-enqueued for this run")
+    except Exception as exc:  # noqa: BLE001 -- deliberately broad, see docstring
+        print(f"WARNING: could not recover orphaned asks from {pending_path}: {exc}")
 
 
 def train_fn(
@@ -150,22 +248,22 @@ def train_fn(
     resumable checkpointing, and final test evaluation.
     """
 
-    hidden_sizes = [LINEAR_SIZES[tune_config["layer1_idx"]]]
+    hidden_sizes = [2 ** tune_config["layer1_size_exp"]]
     if tune_config["num_layers"] == 2:
-        hidden_sizes.append(LINEAR_SIZES[tune_config["layer2_idx"]])
+        hidden_sizes.append(2 ** tune_config["layer2_size_exp"])
 
     overrides: dict[str, Any] = {
-        "data": {"batch_size": BATCH_SIZES[tune_config["batch_size"]]},
+        "data": {"batch_size": 2 ** tune_config["batch_size_exp"]},
         "head": {
             "hidden_sizes": hidden_sizes,
             "dropout": tune_config["s1_dropout"],
         },
         "optim": {
-            "learning_rate": LR_LIST[tune_config["lr1_idx"]],
-            "weight_decay": WEIGHT_DECAYS[tune_config["weight_decay"]],
+            "learning_rate": tune_config["lr1"],
+            "weight_decay": tune_config["weight_decay"],
         },
         "stage": {
-            "second_stage_lr": LR_LIST[tune_config["lr2_idx"]],
+            "second_stage_lr": tune_config["lr2"],
             "second_stage_dropout": tune_config["s2_dropout"],
         },
         "checkpoint": {},
@@ -196,10 +294,19 @@ def train_fn(
 
     def report_to_tune(payload: dict[str, Any]) -> None:
         metrics = {
-            key: value for key, value in payload.items() if key not in {"stage", "epoch", "event"}
+            key: value for key, value in payload.items() if key not in {"stage", "epoch", "event", "stage_epoch"}
         }
         metrics["stage"] = payload["stage"]
         metrics["epoch"] = payload["epoch"]
+        # ASHA schedules on this, not "epoch": "epoch" resets to a per-trial-varying offset at
+        # the stage1->stage2 boundary (stage2 numbers its epochs starting from stage1's
+        # best_epoch, not from 0), so it isn't a shared clock across trials and a grace_period
+        # measured against it can fire while trials are still in stage1. stage_epoch (from
+        # train.py) is 0 for all of stage1 and 1, 2, 3, ... for stage2 regardless of how long
+        # stage1 ran, so every trial's first ASHA rung decision happens only after each trial
+        # has individually completed that many *stage2* epochs.
+        stage_epoch = payload.get("stage_epoch")
+        metrics["stage2_epoch"] = float(stage_epoch) if payload["stage"] == "stage2" and stage_epoch is not None else 0.0
         ray.tune.report(metrics)
 
     train_ag.run(config, show_progress=False, epoch_callback=report_to_tune)
@@ -338,9 +445,9 @@ def main() -> None:
     # this sweep always runs both stages regardless of what the base --config's
     # stage.second_stage_lr says -- unlike train_ag.py standalone, which treats a null
     # second_stage_lr as "stage 2 disabled".
-    max_epochs_per_trial = args.max_epochs_per_trial or (
-        base_config.stage.num_epochs + base_config.stage.second_stage_epochs
-    )
+    # Measured in stage2 epochs (time_attr="stage2_epoch" below), not stage1+stage2 combined --
+    # stage1's own length no longer factors in, since ASHA only ever schedules on stage2 progress.
+    max_epochs_per_trial = args.max_epochs_per_trial or base_config.stage.second_stage_epochs
 
     trainable = tune.with_parameters(
         train_fn,
@@ -352,12 +459,24 @@ def main() -> None:
     )
     trainable = tune.with_resources(trainable, {"cpu": args.cpus_per_trial, "gpu": args.gpus_per_trial})
 
+    # Computed here (not down by the Tuner.can_restore() check below, where it lived before)
+    # because _PendingAsksOptunaSearch needs the path derived from it before search_alg is
+    # constructed, a few lines down.
+    experiment_dir = str(Path(args.storage_path).resolve() / args.experiment_name)
+    global _PENDING_ASKS_PATH
+    _PENDING_ASKS_PATH = str(Path(experiment_dir) / "pending_asks.jsonl")
+
     sampler = optuna.samplers.TPESampler(seed=base_config.runtime.seed, multivariate=True, group=True)
-    search_alg = OptunaSearch(space=_define_by_run_func, sampler=sampler, metric=args.metric, mode=args.mode)
+    search_alg = _PendingAsksOptunaSearch(space=_define_by_run_func, sampler=sampler, metric=args.metric, mode=args.mode)
     scheduler = ASHAScheduler(
-        time_attr="epoch",
+        # stage2_epoch (reported by report_to_tune) is 0 for the entirety of stage1 and
+        # 1, 2, 3, ... within stage2 regardless of how long stage1 took for this trial -- so
+        # no trial can be pruned before it reaches stage2 (grace_period=15 can't be satisfied
+        # while stage2_epoch==0), and every rung compares trials that have each individually
+        # completed the same number of stage2 epochs, not the same nominal "epoch" value.
+        time_attr="stage2_epoch",
         max_t=max_epochs_per_trial,
-        grace_period=15,  # min epochs a trial must run before ASHA can kill it
+        grace_period=15,  # min epochs *into stage2* a trial must run before ASHA can kill it
         reduction_factor=4,  # keep top 25% of each bracket
         brackets=1,
     )
@@ -371,7 +490,6 @@ def main() -> None:
     )
     run_config = ray.tune.RunConfig(name=args.experiment_name, storage_path=args.storage_path, failure_config=ray.tune.FailureConfig(max_failures=10))
 
-    experiment_dir = str(Path(args.storage_path).resolve() / args.experiment_name)
     if Tuner.can_restore(experiment_dir):
         print(f"Existing experiment found at {experiment_dir} -- resuming (Tuner.restore)")
         try:
@@ -381,6 +499,7 @@ def main() -> None:
             _recover_ray_bookkeeping_or_raise(experiment_dir, exc)
             raise  # unreachable if recovery above called sys.exit(); satisfies static analysis
         _backup_ray_bookkeeping(experiment_dir)
+        _recover_orphaned_asks(experiment_dir, tuner)
     else:
         print(f"No existing experiment at {experiment_dir} -- starting fresh")
         tuner = Tuner(trainable, tune_config=tune_config, run_config=run_config)
