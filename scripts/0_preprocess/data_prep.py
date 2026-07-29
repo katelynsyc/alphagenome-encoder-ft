@@ -73,6 +73,50 @@ def acr_excel_to_tsv(excel_file, output_path, sheet_name='ACR sequence library')
     print(f"Wrote {df.shape[0]} rows to {output_path}")
     return df
 
+def jores_design_validation_excel_to_tsv(excel_file, output_path, sheet_name='validation library'):
+    """Extract the validation library sheet (media-5.xlsx) into a modelling-ready
+    tsv matching modelling_data_tamsACR.tsv's schema: id, enrichment_cold,
+    enrichment_dark, enrichment_light, enrichment_warm, enrichment_maize,
+    sequence, set (set is always 'test' -- this is a held-out validation
+    library, not something to train on). Extra columns from the sheet
+    (experiment, GC content (%)) are kept at the end for reference; they're
+    ignored by JoresMPRADataset/create_jores_splits since it reads columns by name.
+
+    Like acr_excel_to_tsv, the sheet has a title/description in the first rows
+    and a merged 'log2(enhancer strength)' group header, so the real column
+    names live on the row right above the data (header=4).
+
+    Rows with any N/A among the 5 enrichment columns or the sequence itself
+    (e.g. the noEnh control row, which has enrichment=0 but no sequence) are
+    dropped -- the number and % dropped are printed before writing.
+    """
+    df = pd.read_excel(excel_file, sheet_name=sheet_name, header=4)
+    conditions = ['light', 'dark', 'warm', 'cold', 'maize']
+
+    total = len(df)
+    na_mask = df[conditions + ['sequence']].isna().any(axis=1)
+    n_dropped = int(na_mask.sum())
+    print(f"Dropping {n_dropped}/{total} rows with any N/A value ({n_dropped / total * 100:.2f}%)")
+
+    df = df[~na_mask].reset_index(drop=True)
+    df = df.rename(columns={
+        'base sequence': 'id',
+        'light': 'enrichment_light',
+        'dark': 'enrichment_dark',
+        'warm': 'enrichment_warm',
+        'cold': 'enrichment_cold',
+        'maize': 'enrichment_maize',
+    })
+    df['set'] = 'test'
+
+    cols = ['id', 'enrichment_cold', 'enrichment_dark', 'enrichment_light',
+            'enrichment_warm', 'enrichment_maize', 'sequence', 'set',
+            'experiment', 'GC content (%)']
+    df = df[cols]
+    df.to_csv(output_path, sep='\t', index=False)
+    print(f"Wrote {df.shape[0]} rows to {output_path}")
+    return df
+
 def count_na_per_condition(excel_file, sheet_name='ACR sequence library'):
     """Print the number (and %) of N/A log2(enhancer strength) values per
     condition (light, dark, warm, cold, maize) in the ACR sequence library sheet.

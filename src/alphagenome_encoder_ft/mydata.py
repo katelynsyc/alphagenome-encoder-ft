@@ -466,7 +466,7 @@ class JoresMPRADataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
             [[_to_float(row["enrichment_cold"]), _to_float(row["enrichment_dark"]), _to_float(row["enrichment_light"]),
               _to_float(row["enrichment_warm"]), _to_float(row["enrichment_maize"])] for row in rows],
             dtype=np.float32,
-        )  # shape (N, 5): [cold, dark, light, warm, maize]
+        ).reshape(-1, 5)  # shape (N, 5): [cold, dark, light, warm, maize] -- reshape keeps an empty `rows` 2-D too
 
         nan_rows = np.isnan(self._targets).any(axis=1)
         if nan_rows.any():

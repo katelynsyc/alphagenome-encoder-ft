@@ -7,6 +7,7 @@ import torch
 import numpy as np
 import seaborn; seaborn.set_style('white')
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 from captum.attr import Saliency
 from tangermeme.plot import plot_logo
 
@@ -151,8 +152,16 @@ def run_gradients(model, test_dataset, device, indices=None, task_names=CONDITIO
     X = torch.stack([test_dataset[i][0] for i in indices])   # (N, L, 4)
     organism_idx = torch.zeros(X.shape[0], dtype=torch.long)  # confirmed unused -- we only use the encoder
 
+    # Chunked the same way raw_gradients() below chunks its saliency pass -- the full
+    # test set (N ~ 33k) in one forward call overflows max_pool1d's int32 indexing
+    # (N * 768 channels * 170 positions at the first pool alone is > 2**31).
+    y0_batches = []
     with torch.no_grad():
-        y0 = model(X.to(device), organism_idx.to(device)).detach().cpu()  # (N, 5) reference predictions
+        for start in range(0, X.shape[0], batch_size):
+            xb = X[start:start + batch_size].to(device)
+            ob = organism_idx[start:start + batch_size].to(device)
+            y0_batches.append(model(xb, ob).detach().cpu())
+    y0 = torch.cat(y0_batches, dim=0)  # (N, 5) reference predictions
     print(f"y0 dims: {tuple(y0.shape)}")  # (N, 5) -- [cold, dark, light, warm, maize] on the reference sequences
 
     grad_raw = raw_gradients(model, X, organism_idx, device, task_names=task_names, batch_size=batch_size)
@@ -185,6 +194,192 @@ def _mean_logo_matrix(attr, mask=None):
     if mask is not None:
         arr = arr[np.asarray(mask)]
     return arr.mean(axis=0), arr.shape[0]
+
+
+def _standardized_ylim(logo_matrices, pad_frac=0.05):
+    """Shared y-axis limits for a batch of (4, L) logo matrices. Uses the same
+    stacked-height logic plot_logo itself uses internally -- the sum of the
+    positive-valued channels at each position, and the sum of the negative-valued
+    ones -- rather than each entry's raw min/max, since several bases can stack at
+    one position and a naive min/max would clip that row's glyphs. Rounded outward
+    to the nearest 0.5 so the grey 0.5-interval gridlines land on the frame edges.
+    (Mirrors saturation_mutagenesis.py's helper of the same name, for consistent
+    formatting between ISM and gradient logo plots.)
+    """
+    pos_max = max(np.sum(np.where(m > 0, m, 0), axis=0).max() for m in logo_matrices)
+    neg_min = min(np.sum(np.where(m < 0, m, 0), axis=0).min() for m in logo_matrices)
+    pad = pad_frac * (pos_max - neg_min) if pos_max > neg_min else 0.05
+    lo = np.floor((neg_min - pad) * 2) / 2
+    hi = np.ceil((pos_max + pad) * 2) / 2
+    return float(lo), float(hi)
+
+
+def _style_logo_ax(ax, ylim):
+    """Apply consistent framing on top of plot_logo()'s output. plot_logo hides
+    the top/right/bottom spines and autoscales ylim per row, so this re-enables a
+    full black box, forces a shared ylim across rows/figures, adds small tick
+    marks, and draws faint grey dotted horizontal gridlines every 0.5 units.
+
+    seaborn.set_style('white') (module import time, above) sets the xtick.bottom /
+    ytick.left rcParams to False, which suppresses tick marks project-wide -- so
+    bottom/left must be forced back on explicitly here, not just styled via length/color.
+    (Mirrors saturation_mutagenesis.py's helper of the same name.)
+    """
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_color("black")
+        spine.set_linewidth(0.8)
+    ax.set_ylim(*ylim)
+    ax.yaxis.set_major_locator(MultipleLocator(0.5))
+    ax.tick_params(axis="both", which="both", direction="out", length=3, width=0.8, color="black",
+                    labelsize=8, bottom=True, left=True, top=False, right=False)
+    ax.grid(axis="y", which="major", linestyle=":", linewidth=0.7, color="grey", alpha=0.6)
+    ax.set_axisbelow(True)
+
+
+def _sanitize_filename(text):
+    """e.g. 'At-12807(PP)_fwd' -> 'At-12807_PP__fwd' -- some ids carry characters
+    that are awkward in filenames."""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in text)
+
+
+def find_row_indices_for_ids(input_tsv, query_ids):
+    """Resolve arbitrary sequence ids to test-split row indices, aligned to the same
+    row order as run_gradients() / summarize_species_masks(). (Mirrors
+    saturation_mutagenesis.py's helper of the same name -- see its docstring for the
+    exact/prefix matching rule and why an unsuffixed id like "At-12806" expands to
+    every strand variant present in the test split.)
+
+    Returns {matched_id: row_idx}. Raises KeyError listing any query_ids with zero
+    matches (e.g. because they're only in the train/val split, not test -- gradients
+    are only cached for the test split).
+    """
+    _, split_rows = summarize_species_masks(input_tsv)
+    ids = [row["id"] for row in split_rows]
+
+    matches = {}
+    unmatched = []
+    for query_id in query_ids:
+        hits = [i for i, row_id in enumerate(ids) if row_id == query_id or row_id.startswith(f"{query_id}_")]
+        if not hits:
+            unmatched.append(query_id)
+            continue
+        for i in hits:
+            matches[ids[i]] = i
+
+    if unmatched:
+        raise KeyError(
+            f"id(s) not found in {input_tsv}'s test split (gradients are only cached for the test split -- "
+            f"check modelling_data_tamsACR.tsv's 'set' column): {unmatched}"
+        )
+    return matches
+
+
+def plot_gradient_logos_by_id(attr_dict, input_tsv, ids, output_dir=None, X=None, hypothetical=True):
+    """Notebook entry point -- plot gradient logos for specific, named sequences
+    (rather than a top-n selection; see plot_top_expression_gradient_logos for
+    that). ids are looked up by the dataset's 'id' column via
+    find_row_indices_for_ids -- an unsuffixed id like "At-12806" expands to every
+    strand variant present in the test split.
+
+    Same per-figure layout, styling, and per-sequence y-axis standardization as
+    plot_top_expression_gradient_logos.
+
+    attr_dict:      {condition_name: torch.Tensor of shape (N, 4, L)} -- grad_corrected
+                     stores (N, L, 4), so transpose first, e.g.
+                     {name: g.transpose(1, 2) for name, g in grad_corrected.items()}.
+    ids:            sequence id(s) to plot, e.g. ["Sl-sh2115_rev", "At-12806"].
+    output_dir:     if given, each figure is saved to output_dir / "gradient_logo_seq_<matched_id>.png".
+    X, hypothetical: see plot_top_expression_gradient_logos -- hypothetical=False
+                     projects onto the observed base only (gradient x input; requires
+                     X, same (N, 4, L) layout as attr_dict).
+
+    Returns {matched_id: fig}.
+    """
+    if not hypothetical and X is None:
+        raise ValueError("hypothetical=False requires passing X (the one-hot sequences, same (N, 4, L) layout as attr_dict)")
+
+    id_to_row = find_row_indices_for_ids(input_tsv, ids)
+
+    _, split_rows = summarize_species_masks(input_tsv)
+    cold_expr = {row["id"]: float(row["enrichment_cold"]) for row in split_rows}
+    warm_expr = {row["id"]: float(row["enrichment_warm"]) for row in split_rows}
+
+    conditions = list(attr_dict)
+    n_seqs = next(iter(attr_dict.values())).shape[0]
+    if n_seqs != len(split_rows):
+        raise ValueError(
+            f"attr_dict has {n_seqs} sequences but {input_tsv}'s test split has {len(split_rows)} rows -- "
+            "plot_gradient_logos_by_id only works when the gradient cache covers the FULL test set "
+            "(run_gradients(..., indices=None), the main() default), not a stratified subset."
+        )
+
+    def _logo_matrix(condition_name, row_idx):
+        arr = attr_dict[condition_name][row_idx]
+        logo_matrix = arr.detach().cpu().numpy() if hasattr(arr, "detach") else np.asarray(arr)
+        if not hypothetical:
+            x_row = X[row_idx]
+            x_row = x_row.detach().cpu().numpy() if hasattr(x_row, "detach") else np.asarray(x_row)
+            logo_matrix = logo_matrix * x_row  # project onto the observed base (gradient x input)
+        return logo_matrix
+
+    figs = {}
+    for matched_id, row_idx in id_to_row.items():
+        logo_matrices = [_logo_matrix(condition_name, row_idx) for condition_name in conditions]
+        ylim = _standardized_ylim(logo_matrices)  # shared across this sequence's own condition rows only
+
+        fig, axes = plt.subplots(len(conditions), 1, figsize=(9, 1.8 * len(conditions)), sharex=True, squeeze=False)
+
+        for row, (condition_name, logo_matrix) in enumerate(zip(conditions, logo_matrices)):
+            ax = axes[row, 0]
+            plot_logo(logo_matrix, ax=ax)  # plot_logo's standard A/C/G/T coloring
+            _style_logo_ax(ax, ylim)
+            ax.set_ylabel(condition_name, fontsize=9, rotation=0, ha="right", va="center")
+
+        title = f"{matched_id}  (cold={cold_expr[matched_id]:.2f}, warm={warm_expr[matched_id]:.2f})"
+        axes[0, 0].set_title(title, fontsize=10, fontweight="bold")
+        axes[-1, 0].set_xlabel("Sequence Position", fontsize=9)
+        fig.supylabel("Corrected saliency score", fontsize=9)
+        fig.tight_layout()
+
+        if output_dir:
+            fig.savefig(Path(output_dir) / f"gradient_logo_seq_{_sanitize_filename(matched_id)}.png", dpi=300)
+
+        figs[matched_id] = fig
+
+    return figs
+
+
+def select_top_expression_indices(input_tsv, species_masks, n=5):
+    """Rank test-split sequences by *measured* MPRA expression (enrichment_cold /
+    enrichment_warm columns in input_tsv), not model predictions, and take the top n
+    per species for each condition. Only needs the TSV -- no model, no dataset
+    object, no forward pass. (Mirrors saturation_mutagenesis.py's helper of the
+    same name -- see its docstring for why row order lines up with a full-test-set
+    cache with no extra bookkeeping.)
+
+    species_masks:  {species_name: bool array}, e.g. build_species_masks(...) output
+                     with "Other" excluded, aligned to the test split (summarize_species_masks).
+
+    Returns (selections, cold_expr, warm_expr, ids):
+      selections: {"cold": {species: [row_idx, ...]}, "warm": {species: [row_idx, ...]}},
+                   row_idx values sorted by descending expression within each species.
+      cold_expr, warm_expr, ids: (N,) arrays aligned to the test split's row order, for labeling.
+    """
+    _, split_rows = summarize_species_masks(input_tsv)
+    cold_expr = np.array([float(row["enrichment_cold"]) for row in split_rows])
+    warm_expr = np.array([float(row["enrichment_warm"]) for row in split_rows])
+    ids = np.array([row["id"] for row in split_rows])
+
+    selections = {}
+    for condition_name, expr in (("cold", cold_expr), ("warm", warm_expr)):
+        selections[condition_name] = {}
+        for species, mask in species_masks.items():
+            idxs = np.flatnonzero(mask)
+            order = np.argsort(-expr[idxs])  # descending
+            selections[condition_name][species] = idxs[order[:n]]
+
+    return selections, cold_expr, warm_expr, ids
 
 
 def plot_gradient_logos_by_species(attr_dict, species_masks, output_dir=None):
@@ -222,6 +417,109 @@ def plot_gradient_logos_by_species(attr_dict, species_masks, output_dir=None):
             fig.savefig(Path(output_dir) / f"gradient_logo_{condition_name}.png", dpi=300)
 
         figs[condition_name] = fig
+
+    return figs
+
+
+def plot_top_expression_gradient_logos(attr_dict, input_tsv, species_masks, n=5, output_dir=None,
+                                        X=None, hypothetical=True):
+    """Notebook entry point -- per-sequence analog of plot_gradient_logos_by_species():
+    instead of averaging gradient-corrected saliency across sequences, plots one
+    figure per individually selected sequence. Uses the same _standardized_ylim /
+    _style_logo_ax formatting as saturation_mutagenesis.py's ISM per-sequence plots
+    (black box, small ticks, faint grey 0.5-interval gridlines, y-axis standardized
+    across that one sequence's own condition rows), so gradient and ISM figures read
+    as one consistent visual style. Reuses an already-computed, cached gradient
+    result -- no model and no re-run of raw_gradients()/apply_correction() needed;
+    see load_grad_cache().
+
+    For each species, selects the top-n sequences by measured enrichment_cold and
+    enrichment_warm respectively (select_top_expression_indices, ground-truth MPRA
+    values -- not model predictions) and makes one figure per selected sequence, one
+    row per condition in attr_dict (just cold and warm by default -- pass
+    add_condition_differences(grad_corrected) in if you also want the difference
+    conditions as extra rows).
+
+    attr_dict:      {condition_name: torch.Tensor of shape (N, 4, L)} -- grad_corrected
+                     stores (N, L, 4) (saliency preserves the dataset's native
+                     layout), so transpose first, e.g.
+                     {name: g.transpose(1, 2) for name, g in grad_corrected.items()}
+                     (see main()'s grad_corrected_for_plot).
+    species_masks:  {species_name: array-like[bool]}, e.g. build_species_masks(...)
+                     with "Other" excluded.
+    output_dir:     if given, each figure is saved to
+                     output_dir / "gradient_logo_seq_<rank_by>_<species>_rank<rank>_row<row_idx>.png".
+    X:              the one-hot sequences, same (N, 4, L) layout as attr_dict -- transpose
+                     the gradient cache's X the same way, e.g. X.transpose(1, 2). Only
+                     needed when hypothetical=False.
+    hypothetical:   attr_dict normally holds the full gradient over all 4 channels per
+                     position (every base's saliency, not just the one actually in the
+                     sequence -- "hypothetical", in ISM terminology). Passing
+                     hypothetical=False here projects onto the observed base only
+                     (grad * X, zeroing the other 3 channels per position -- i.e.
+                     gradient x input) at plot time -- no need to recompute
+                     grad_corrected -- for a single-letter-per-position track. Requires
+                     X. Mirrors saturation_mutagenesis.py's
+                     plot_top_expression_sequence_logos(hypothetical=...).
+
+    Returns {key: fig}, key = "<rank_by>_<species>_rank<rank>_row<row_idx>".
+    """
+    if not hypothetical and X is None:
+        raise ValueError("hypothetical=False requires passing X (the one-hot sequences, same (N, 4, L) layout as attr_dict)")
+
+    selections, cold_expr, warm_expr, ids = select_top_expression_indices(input_tsv, species_masks, n=n)
+
+    conditions = list(attr_dict)
+    n_seqs = next(iter(attr_dict.values())).shape[0]
+    if n_seqs != len(cold_expr):
+        raise ValueError(
+            f"attr_dict has {n_seqs} sequences but {input_tsv}'s test split has {len(cold_expr)} rows -- "
+            "plot_top_expression_gradient_logos only works when the gradient cache covers the FULL test "
+            "set (run_gradients(..., indices=None), the main() default), not a stratified subset."
+        )
+
+    def _logo_matrix(condition_name, row_idx):
+        arr = attr_dict[condition_name][row_idx]
+        logo_matrix = arr.detach().cpu().numpy() if hasattr(arr, "detach") else np.asarray(arr)
+        if not hypothetical:
+            x_row = X[row_idx]
+            x_row = x_row.detach().cpu().numpy() if hasattr(x_row, "detach") else np.asarray(x_row)
+            logo_matrix = logo_matrix * x_row  # project onto the observed base (gradient x input)
+        return logo_matrix
+
+    plot_items = [
+        (rank_by, species, rank, int(row_idx))
+        for rank_by, per_species in selections.items()
+        for species, row_idxs in per_species.items()
+        for rank, row_idx in enumerate(row_idxs, start=1)
+    ]
+
+    figs = {}
+    for item in plot_items:
+        rank_by, species, rank, row_idx = item
+        logo_matrices = [_logo_matrix(condition_name, row_idx) for condition_name in conditions]
+        ylim = _standardized_ylim(logo_matrices)  # shared across this sequence's own condition rows only
+
+        fig, axes = plt.subplots(len(conditions), 1, figsize=(9, 1.8 * len(conditions)), sharex=True, squeeze=False)
+
+        for row, (condition_name, logo_matrix) in enumerate(zip(conditions, logo_matrices)):
+            ax = axes[row, 0]
+            plot_logo(logo_matrix, ax=ax)  # plot_logo's standard A/C/G/T coloring
+            _style_logo_ax(ax, ylim)
+            ax.set_ylabel(condition_name, fontsize=9, rotation=0, ha="right", va="center")
+
+        title = (f"{species} — top-{rank} by {rank_by} expression  "
+                 f"(id={ids[row_idx]}, cold={cold_expr[row_idx]:.2f}, warm={warm_expr[row_idx]:.2f})")
+        axes[0, 0].set_title(title, fontsize=10, fontweight="bold")
+        axes[-1, 0].set_xlabel("Sequence Position", fontsize=9)
+        fig.supylabel("Corrected saliency score", fontsize=9)
+        fig.tight_layout()
+
+        key = f"{rank_by}_{species}_rank{rank}_row{row_idx}"
+        if output_dir:
+            fig.savefig(Path(output_dir) / f"gradient_logo_seq_{key}.png", dpi=300)
+
+        figs[key] = fig
 
     return figs
 

@@ -1,0 +1,69 @@
+{
+  "_comment": "75% downsampled version of ag_jores.json: data.subset_frac=0.75 randomly downsamples train+val rows (test stays full size, see create_jores_splits). Epoch-associated stopping/scheduling knobs (stage.num_epochs, stage.second_stage_epochs, stage.early_stopping_patience, optim.plateau_patience) are divided by 0.75 (i.e. multiplied by ~1.333x, rounded to nearest int) to keep the training budget (in gradient steps) and patience windows proportional to the full-data run.",
+  "data": {
+    "input_tsv": null,
+    "sequence_length": 170,
+    "batch_size": 128,
+    "barcode_min": 1,
+    "barcode_min_eval": 1,
+    "reverse_complement": false,
+    "rc_prob": 0.5,
+    "random_shift": true,
+    "shift_prob": 0.5,
+    "max_shift": 15,
+    "subset_frac": 0.75,
+    "num_workers": 4,
+    "pin_memory": false,
+    "val_chroms": [],
+    "test_chroms": [],
+    "weight_scheme": "none",
+    "split_mode": "jores",
+    "train_frac": 0.8,
+    "val_frac": 0.1
+  },
+  "head": {
+    "head_type": "joresmpra",
+    "num_outputs": 5,
+    "center_bp": 256,
+    "pooling_type": "flatten",
+    "hidden_sizes": [1024],
+    "dropout": 0.3,
+    "activation": "relu"
+  },
+  "optim": {
+    "optimizer": "adam",
+    "learning_rate": 5e-5,
+    "weight_decay": 1e-6,
+    "lr_scheduler": "constant",
+    "plateau_patience": 5,
+    "gradient_accumulation_steps": 1,
+    "gradient_clip": null
+  },
+  "stage": {
+    "num_epochs": 67,
+    "early_stopping_patience": 13,
+    "val_evals_per_epoch": 1,
+    "second_stage_lr": 1e-6,
+    "second_stage_epochs": 333,
+    "second_stage_lr_scheduler": "plateau",
+    "second_stage_dropout": null
+  },
+  "cached_embeddings": {
+    "use_cached_embeddings": false,
+    "cache_file": null
+  },
+  "checkpoint": {
+    "pretrained_weights": null,
+    "checkpoint_dir": "./results/models/checkpoints/"
+  },
+  "logging": {
+    "use_wandb": true,
+    "wandb_project": "alphagenome-jores",
+    "wandb_name": "ag-jores-ds75"
+  },
+  "runtime": {
+    "device": null,
+    "use_amp": true,
+    "seed": 42
+  }
+}
