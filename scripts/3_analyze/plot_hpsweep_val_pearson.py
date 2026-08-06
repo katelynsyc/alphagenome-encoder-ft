@@ -138,8 +138,8 @@ def plot_val_pearson_distribution(
     # --- Panel 1: overall distribution -------------------------------------------------
     bins = np.linspace(values.min(), values.max(), n_bins + 1)
     ax_hist.hist(values, bins=bins, color=HIST_COLOR, alpha=0.9, edgecolor="white", linewidth=0.5)
-    ax_hist.set_ylabel(f"Trial count (n={len(trials)})")
-    ax_hist.set_title("val_pearson across the ag_hpsweep_1000 hyperparameter sweep")
+    ax_hist.set_ylabel(f"Trial Count (n={len(trials)})", fontsize=14, labelpad=10)
+    ax_hist.set_title("Validation Pearson's r across Hyperparameter Sweep", fontsize=18, fontweight="bold", pad=16)
 
     # --- Panel 2: every trial, colored by completed vs. pruned by ASHA -----------------
     rng = np.random.default_rng(0)
@@ -156,8 +156,8 @@ def plot_val_pearson_distribution(
         label=f"Ran to completion (n={n_completed})",
     )
     ax_strip.set_yticks([])
-    ax_strip.set_ylabel("all trials\n(jittered)")
-    ax_strip.set_xlabel("val_pearson")
+    ax_strip.set_ylabel("All Trials (jittered)", fontsize=14, labelpad=10)
+    ax_strip.set_xlabel("Validation Pearson's r", fontsize=14, labelpad=10)
     # Points are jittered across the FULL x-range (including a pile-up of diverged trials right
     # at x=0), legend placed outside the axes so it never sits on top of any point regardless of jitter.
     ax_strip.legend(
@@ -175,23 +175,24 @@ def plot_val_pearson_distribution(
     # which collide with each other whenever baseline and best are close together in x.
     top = ax_hist.get_ylim()[1]
     ax_hist.annotate(
-        f"{baseline_label}\nval_pearson={baseline_pearson:.5f}",
+        f"{baseline_label}\nr={baseline_pearson:.5f}",
         xy=(baseline_pearson, 0.55 * top), xytext=(0.30 * values.max(), 0.92 * top),
-        ha="center", va="top", fontsize=9, color=BASELINE_COLOR,
+        ha="center", va="top", fontsize=13, color=BASELINE_COLOR,
         arrowprops=dict(arrowstyle="-", color=BASELINE_COLOR, linewidth=1),
     )
     ax_hist.annotate(
-        f"Best trial {best.trial_id} ({best.stage}, iter {best.iteration})\nval_pearson={best.val_pearson:.4f}",
+        f"Best trial\nr={best.val_pearson:.4f}",
         xy=(best.val_pearson, 0.30 * top), xytext=(0.30 * values.max(), 0.55 * top),
-        ha="center", va="top", fontsize=9, color=BEST_COLOR,
+        ha="center", va="top", fontsize=13, color=BEST_COLOR,
         arrowprops=dict(arrowstyle="-", color=BEST_COLOR, linewidth=1),
     )
 
     for ax in (ax_hist, ax_strip):
         ax.spines["top"].set_visible(False)
         ax.spines["right"].set_visible(False)
+        ax.tick_params(labelsize=12)
 
-    fig.tight_layout()
+    fig.tight_layout(h_pad=2.5)
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=300, bbox_inches="tight")
     print(f"Saved {output_path}")
@@ -209,7 +210,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Ray Tune experiment storage dir, e.g. results/ray_tune/ag_hpsweep_1000",
     )
     parser.add_argument("--baseline_pearson", type=float, default=0.70671)
-    parser.add_argument("--baseline_label", type=str, default="Before hyperparameter sweep")
+    parser.add_argument("--baseline_label", type=str, default="Before hyperparameter sweep:")
     parser.add_argument("--output_path", type=str, default="results/plots/ag_hpsweep_1000_val_pearson_distribution.png")
     parser.add_argument("--n_bins", type=int, default=40)
     return parser

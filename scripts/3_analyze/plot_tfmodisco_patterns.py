@@ -27,6 +27,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                               "pattern's row with its best known-motif match and p-value.")
     parser.add_argument("--output_dir", default="TF-MoDISco_logos",
                          help="Directory to write one PNG per condition x pos/neg group.")
+    parser.add_argument("--pval_threshold", type=float, default=0.01,
+                         help="Only plot patterns whose best JASPAR database match (pval0) is at or below this "
+                              "value -- drops patterns with no confident known-motif annotation. Default 0.01.")
     return parser
 
 
@@ -34,8 +37,12 @@ def pattern_sort_key(pattern: str) -> int:
     return int(pattern.rsplit('_', 1)[1])
 
 
-def plot_group(df: pd.DataFrame, matches: pd.DataFrame, title: str, out_path: Path) -> None:
+def plot_group(df: pd.DataFrame, matches: pd.DataFrame, title: str, out_path: Path, pval_threshold: float) -> None:
     patterns = sorted(df['pattern'].unique(), key=pattern_sort_key)
+    patterns = [p for p in patterns if matches.loc[p, 'pval0'] <= pval_threshold] #only plot those that meet the pval threshold
+    if not patterns:
+        print(f"No patterns in {title!r} pass pval0 <= {pval_threshold} -- skipping {out_path}")
+        return
 
     grid_height = 1.4 * len(patterns)
     title_pad = 0.4  # inches reserved above the grid for fig.suptitle, constant regardless of pattern count so it
@@ -86,9 +93,10 @@ def main() -> None:
     matches = pd.read_csv(args.tomtom_tsv, sep='\t').set_index(['condition', 'pattern'])
 
     for (condition, sign), group in df.groupby(['condition', 'sign']):
-        plot_group(group, matches.loc[condition], title=f'{condition} {sign}', out_path=out_dir / f'{condition}_{sign}.png')
+        plot_group(group, matches.loc[condition], title=f'{condition} {sign}', out_path=out_dir / f'{condition}_{sign}.png',
+                   pval_threshold=args.pval_threshold)
 
-    print(f'Wrote {df.groupby(["condition", "sign"]).ngroups} grouped figures to {out_dir}')
+    print(f'Wrote grouped figures to {out_dir} (patterns filtered to JASPAR match pval0 <= {args.pval_threshold})')
 
 
 if __name__ == "__main__":

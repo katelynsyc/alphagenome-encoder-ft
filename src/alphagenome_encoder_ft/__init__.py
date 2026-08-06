@@ -49,6 +49,14 @@ __all__ = [
     "add_metrics_to_history",
     "stable_run_id",
     "training_run_id",
+    "parse_objective_tokens",
+    "parse_round_tokens",
+    "total_evolution_rounds",
+    "target_conditions_for_experiment",
+    "load_target_conditions",
+    "compute_targeted_metrics",
+    "save_targeted_predictions",
+    "OBJECTIVE_TO_CONDITIONS",
 ]
 
 
@@ -110,6 +118,19 @@ def __getattr__(name: str):
         from . import heads
 
         return getattr(heads, name)
+    if name in {
+        "parse_objective_tokens",
+        "parse_round_tokens",
+        "total_evolution_rounds",
+        "target_conditions_for_experiment",
+        "load_target_conditions",
+        "compute_targeted_metrics",
+        "save_targeted_predictions",
+        "OBJECTIVE_TO_CONDITIONS",
+    }:
+        from . import evolution_objectives
+
+        return getattr(evolution_objectives, name)
     if name in {
         "train_epoch",
         "evaluate",

@@ -40,7 +40,7 @@ from alphagenome_encoder_ft import build_species_masks
 
 METADATA_DIR = "/grid/koo/home/kachu/projects/alphagenome-encoder-ft/metadata"
 DEFAULT_PREDICTIONS = (
-    f"{METADATA_DIR}/../results/ray_tune/ag_hpsweep_1000/checkpoints/e898939e/df4406c4716cd2cf/"
+    f"{METADATA_DIR}/../results/e898939e/df4406c4716cd2cf/"
     "stage2/best_test_eval/test_predictions.csv"
 )
 DEFAULT_OUTPUT = f"{METADATA_DIR}/actual_and_predicted_cold_minus_warm_top100.tsv"

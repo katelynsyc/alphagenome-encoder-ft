@@ -97,6 +97,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--metric", type=str, default="val_pearson") #optuna uses val pearson to optimize the values & also early stop for ASHA
     parser.add_argument("--mode", type=str, default="max", choices=["max", "min"])
     parser.add_argument("--max_epochs_per_trial", type=int, default=None, help="ASHA max_t, measured in stage2 epochs (time_attr='stage2_epoch'); defaults to stage.second_stage_epochs from --config")
+    parser.add_argument("--grace_period", type=int, default=None, help="ASHA grace_period, measured in stage2 epochs; defaults to 6%% of max_epochs_per_trial (matching the original 15/250 ratio) so it scales with downsampled configs instead of staying fixed")
     return parser
 
 
@@ -448,6 +449,10 @@ def main() -> None:
     # Measured in stage2 epochs (time_attr="stage2_epoch" below), not stage1+stage2 combined --
     # stage1's own length no longer factors in, since ASHA only ever schedules on stage2 progress.
     max_epochs_per_trial = args.max_epochs_per_trial or base_config.stage.second_stage_epochs
+    # 6% of max_t matches the original hardcoded 15/250 ratio from the full-data sweep, so
+    # this scales proportionally for downsampled configs (e.g. ds10's second_stage_epochs=2500)
+    # instead of staying fixed at 15 and pruning trials far earlier relative to their budget.
+    grace_period = args.grace_period or max(1, round(0.06 * max_epochs_per_trial))
 
     trainable = tune.with_parameters(
         train_fn,
@@ -471,12 +476,12 @@ def main() -> None:
     scheduler = ASHAScheduler(
         # stage2_epoch (reported by report_to_tune) is 0 for the entirety of stage1 and
         # 1, 2, 3, ... within stage2 regardless of how long stage1 took for this trial -- so
-        # no trial can be pruned before it reaches stage2 (grace_period=15 can't be satisfied
+        # no trial can be pruned before it reaches stage2 (grace_period can't be satisfied
         # while stage2_epoch==0), and every rung compares trials that have each individually
         # completed the same number of stage2 epochs, not the same nominal "epoch" value.
         time_attr="stage2_epoch",
         max_t=max_epochs_per_trial,
-        grace_period=15,  # min epochs *into stage2* a trial must run before ASHA can kill it
+        grace_period=grace_period,  # min epochs *into stage2* a trial must run before ASHA can kill it
         reduction_factor=4,  # keep top 25% of each bracket
         brackets=1,
     )

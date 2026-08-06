@@ -29,7 +29,7 @@ sys.path.insert(0, "scripts/3_analyze")
 from pathlib import Path
 from alphagenome_encoder_ft import load_config_from_checkpoint
 
-checkpoint_path = Path("results/ray_tune/ag_hpsweep_1000/checkpoints/e898939e/df4406c4716cd2cf/stage2/best.pt")
+checkpoint_path = Path("results/e898939e/df4406c4716cd2cf/stage2/best.pt")
 config, _ = load_config_from_checkpoint(checkpoint_path)
 
 target_ids = ["Sl-sh2115_rev", "At-12806_fwd"]  
@@ -535,6 +535,18 @@ def save_ism_cache(cache_path, X, organism_idx, y0, y_hat):
 def load_ism_cache(cache_path):
     cached = torch.load(cache_path, map_location="cpu")
     return cached["X"], cached["organism_idx"], cached["y0"], cached["y_hat"]
+
+
+def combine_ism_caches(cache_paths, output_path):
+    """Concatenate several load_ism_cache()-compatible caches along the batch (N)
+    dimension into one pooled cache, e.g. to pool multiple individually-cached
+    sequences into one batch for tfmodisco_ism.py (which wants seqlets pooled
+    across examples, not one sequence at a time)."""
+    Xs, organism_idxs, y0s, y_hats = zip(*(load_ism_cache(path) for path in cache_paths))
+    save_ism_cache(
+        output_path, torch.cat(Xs, dim=0), torch.cat(organism_idxs, dim=0),
+        torch.cat(y0s, dim=0), torch.cat(y_hats, dim=0),
+    )
 
 
 def compute_attributions(y0, y_hat, X):

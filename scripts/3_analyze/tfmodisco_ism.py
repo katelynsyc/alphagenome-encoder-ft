@@ -12,7 +12,7 @@ import pandas as pd
 
 from saturation_mutagenesis import load_ism_cache, compute_attributions
 
-conditions = ['cold', 'warm']
+DEFAULT_CONDITIONS = ['cold', 'warm']
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -23,6 +23,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Directory to write per-condition .h5 files and the combined .tsv.gz.")
     parser.add_argument("--max_seqlets", type=int, default=20000,
                          help="max_seqlets_per_metacluster passed to TFMoDISco.")
+    parser.add_argument("--conditions", nargs="+", default=DEFAULT_CONDITIONS,
+                         help="Which of compute_attributions()'s conditions to run TF-MoDISco on. "
+                              f"Default: {DEFAULT_CONDITIONS} (both). Pass e.g. --conditions warm to "
+                              "run only the warm condition.")
     return parser
 
 
@@ -51,8 +55,8 @@ def main() -> None:
 
     one_hot = to_length_major(X)  # computed once -- identical for both conditions, like ohe_seqs was
 
-    # Run TF-MoDISco for cold and warm:
-    for condition in conditions:
+    # Run TF-MoDISco for the requested condition(s):
+    for condition in args.conditions:
         print(f'Running TF-MoDISo for condition "{condition}":')
 
         hyp_contribs = to_length_major(attr_dict[condition])  # this condition's ISM attribution, in place of DeepLIFT_data
@@ -77,7 +81,7 @@ def main() -> None:
     # Save pattern data as .tsv files:
     all_patterns = []
 
-    for condition in conditions:  # open each condition's h5 file and check if it contains pos or neg patterns
+    for condition in args.conditions:  # open each condition's h5 file and check if it contains pos or neg patterns
         with h5py.File(out_dir / f'TF-MoDISco_patterns_{condition}.h5') as modisco_file:
             for pattern in ['pos', 'neg']:
                 if pattern + '_patterns' not in modisco_file:
@@ -92,7 +96,12 @@ def main() -> None:
                     })
                     all_patterns.append(pattern_df)
 
-    pd.concat(all_patterns).to_csv(out_dir / 'TF-MoDISco_patterns.tsv.gz', sep='\t', na_rep='NA', index=False)  # combined table of every motif from every condition to gzipped tsv
+    # No patterns found for any condition -- write an empty but correctly-columned output.
+    combined_columns = ['condition', 'pattern', 'pos'] + [f'ppm_{b}' for b in 'ACGT'] + [f'cwm_{b}' for b in 'ACGT']
+    combined = pd.concat(all_patterns) if all_patterns else pd.DataFrame(columns=combined_columns)
+    if not all_patterns:
+        print(f"No patterns found for any of {args.conditions} -- writing an empty TF-MoDISco_patterns.tsv.gz")
+    combined.to_csv(out_dir / 'TF-MoDISco_patterns.tsv.gz', sep='\t', na_rep='NA', index=False)  # combined table of every motif from every condition to gzipped tsv
 
 
 if __name__ == "__main__":

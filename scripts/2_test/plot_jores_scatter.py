@@ -4,6 +4,10 @@
 Consumes the test_predictions.csv written by evaluate_jores.py (columns
 "{condition}_true"/"{condition}_pred" for cold/dark/light/warm/maize) so the
 model does not need to be re-run to make this plot.
+
+A "{condition}_true"/"{condition}_pred" cell may be blank -- evolution_objectives.
+save_targeted_predictions leaves off-target conditions blank for a given row -- in
+which case that row is dropped from that condition's n / Pearson r / scatter only.
 """
 
 from __future__ import annotations
@@ -52,6 +56,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_optional_float(value: str) -> float:
+    return float(value) if value != "" else float("nan")
+
+
 def load_predictions(path: Path, condition_names: list[str]) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     with open(path, newline="") as handle:
         reader = csv.DictReader(handle)
@@ -59,9 +67,12 @@ def load_predictions(path: Path, condition_names: list[str]) -> dict[str, tuple[
 
     by_condition: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for name in condition_names:
-        true_vals = np.array([float(row[f"{name}_true"]) for row in rows], dtype=np.float64)
-        pred_vals = np.array([float(row[f"{name}_pred"]) for row in rows], dtype=np.float64)
-        by_condition[name] = (true_vals, pred_vals)
+        true_vals = np.array([_parse_optional_float(row[f"{name}_true"]) for row in rows], dtype=np.float64)
+        pred_vals = np.array([_parse_optional_float(row[f"{name}_pred"]) for row in rows], dtype=np.float64)
+        # Blank cells (off-target rows from save_targeted_predictions) parse to NaN --
+        # drop them here so a plain evaluate_jores.py CSV (no blanks) is unaffected.
+        mask = np.isfinite(true_vals) & np.isfinite(pred_vals)
+        by_condition[name] = (true_vals[mask], pred_vals[mask])
     return by_condition
 
 

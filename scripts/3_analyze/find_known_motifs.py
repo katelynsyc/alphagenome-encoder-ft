@@ -10,9 +10,9 @@ from tangermeme.annotate import read_meme, tomtom
 
 """
 python3 scripts/3_analyze/find_known_motifs.py \
-  --patterns_tsv results/ray_tune/ag_hpsweep_1000/checkpoints/e898939e/df4406c4716cd2cf/stage2/TF-MoDISco_ism/TF-MoDISco_patterns.tsv.gz \
+  --patterns_tsv results/e898939e/df4406c4716cd2cf/stage2/TF-MoDISco_ism/TF-MoDISco_patterns.tsv.gz \
   --meme_db metadata/motif_databases/JASPAR2026_CORE_plants_non-redundant_pfms_meme.txt \
-  --output_tsv results/ray_tune/ag_hpsweep_1000/checkpoints/e898939e/df4406c4716cd2cf/stage2/TF-MoDISco_ism/TF-MoDISco_tomtom_matches.tsv
+  --output_tsv results/e898939e/df4406c4716cd2cf/stage2/TF-MoDISco_ism/TF-MoDISco_tomtom_matches.tsv
 """
 
 bases = list('ACGT')
@@ -54,6 +54,13 @@ def main() -> None:
         trimmed = trim_by_cwm(ppm, cwm, args.trim_threshold)
         keys.append((condition, pattern))
         queries.append(trimmed.T)  # tomtom expects (alphabet, length)
+
+    if not keys:
+        # No patterns to match -- write an empty but correctly-columned output.
+        columns = ['condition', 'pattern'] + [c for j in range(args.top_n_matches) for c in (f'match{j}', f'pval{j}')]
+        pd.DataFrame(columns=columns).to_csv(args.output_tsv, sep='\t', index=False)
+        print(f'{args.patterns_tsv} has no patterns -- wrote an empty {args.output_tsv}')
+        return
 
     target_db = read_meme(args.meme_db)
     target_names = list(target_db.keys())
